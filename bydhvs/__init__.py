@@ -671,12 +671,7 @@ class BYDHVS:
     async def state11_send_request9(self) -> None:
         """Handle additional cells for more than 128 cells (e.g., 5 modules)"""
         # State 11: Send request 9 - Switch to second pass
-        if self.current_tower == 0:
-            await self.send_request(self.my_requests['start_measure_box_1'])
-        elif self.current_tower == 1:
-            await self.send_request(self.my_requests['start_measure_box_2'])
-        elif self.current_tower == 2:
-            await self.send_request(self.my_requests['start_measure_box_3'])
+        await self.send_request(self.my_requests['switch_pass'])
         data = await self.receive_response()
         if data and self.check_packet(data):
             self.my_state = 12
@@ -686,7 +681,12 @@ class BYDHVS:
 
     async def state12_send_request10(self) -> None:
         """State 12: Send request 10 - Start measurement"""
-        await self.send_request(self.my_requests['start_measurement'])
+        if self.current_tower == 0:
+            await self.send_request(self.my_requests['start_measure_box_1'])
+        elif self.current_tower == 1:
+            await self.send_request(self.my_requests['start_measure_box_2'])
+        elif self.current_tower == 2:
+            await self.send_request(self.my_requests['start_measure_box_3'])
         data = await self.receive_response()
         if data and self.check_packet(data):
             # Wait time as per original code (e.g., 3 seconds)
