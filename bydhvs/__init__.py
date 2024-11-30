@@ -77,6 +77,7 @@ class BYDHVS:
         self.hvs_eta = 0.0
         self.hvs_batt_type_from_serial = ""
         self.hvs_batt_type = ""
+        self.hvs_batt_type_string = ""
         self.hvs_inv_type = ""
         self.hvs_num_cells = 0
         self.hvs_num_temps = 0
@@ -369,12 +370,13 @@ class BYDHVS:
 
         # Map battery type to module and cell counts
         batt_type_map = {
-            0: {'cell_count': 0, 'temp_count': 0},
-            1: {'cell_count': 16, 'temp_count': 8},
-            2: {'cell_count': 32, 'temp_count': 12},
+            0: {'string': 'LVM', 'cell_count': 0, 'temp_count': 0},
+            1: {'string': 'HVM', 'cell_count': 16, 'temp_count': 8},
+            2: {'string': 'HVS', 'cell_count': 32, 'temp_count': 12},
         }
 
         batt_info = batt_type_map.get(self.hvs_batt_type, {})
+        self.hvs_batt_type_string = batt_info.get('string', '')
         self.hvs_module_cell_count = batt_info.get('cell_count', 0)
         self.hvs_module_cell_temp_count = batt_info.get('temp_count', 0)
         self.hvs_num_cells = self.hvs_modules * self.hvs_module_cell_count
@@ -661,7 +663,11 @@ class BYDHVS:
             if self.hvs_num_cells > 128:
                 self.my_state = 11
             else:
-                self.my_state = 0  # Polling completed
+                if self.current_tower + 1 < self.hvs_towers:
+                    self.current_tower += 1
+                    self.my_state = 5
+                else:
+                    self.my_state = 0  # Polling completed
         else:
             _LOGGER.error("Invalid or no data received in state 10")
             self.my_state = 0
@@ -769,6 +775,7 @@ class BYDHVS:
             "eta": self.hvs_eta,
             "battery_type_from_serial": self.hvs_batt_type_from_serial,
             "battery_type": self.hvs_batt_type,
+            "battery_type_string": self.hvs_batt_type_string,
             "inverter_type": self.hvs_inv_type_string,
             "number_of_cells": self.hvs_num_cells,
             "number_of_temperatures": self.hvs_num_temps,
