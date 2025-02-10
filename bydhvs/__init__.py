@@ -514,10 +514,10 @@ class BYDHVS:
             _LOGGER.warning("Already polling")
             return
         self.my_state = 1
+        self.current_tower = 0
+        self.state_action_list = []
+
         await self.connect()
-        if self.my_state == 0:
-            await self.close()
-            return  # Connection failed
 
         # State machine for polling process
         state_actions = {
