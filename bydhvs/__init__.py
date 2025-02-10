@@ -36,7 +36,7 @@ class BYDHVS:
 
     MAX_CELLS = 160
     MAX_TEMPS = 64
-    SLEEP_TIME = 3
+    SLEEP_TIME = 4
 
     def __init__(self, ip_address: str, port: int = 8080) -> None:
         """Initialize the BYDHVS communication class."""
@@ -92,6 +92,7 @@ class BYDHVS:
         self.max_cell_temp_cell = 0
         self.min_cell_temp_cell = 0
         self.current_tower = 0
+        self.state_action_list = []
 
 # Initialize the requests
 # self.my_requests = [
@@ -410,6 +411,7 @@ class BYDHVS:
         """Parse packet 5 containing cell voltage and balancing status."""
         tower = self.tower_attributes[tower_number]
 
+        tower['no'] = tower_number
         tower['max_cell_voltage_mv'] = self.buf2int16_si(data, 5)
         tower['min_cell_voltage_mv'] = self.buf2int16_si(data, 7)
         tower['max_cell_voltage_cell'] = data[9]
@@ -537,6 +539,7 @@ class BYDHVS:
 
         while self.my_state != 0:
             action = state_actions.get(self.my_state)
+            self.state_action_list.append(self.my_state)
             if action:
                 await action()
             else:
@@ -783,4 +786,5 @@ class BYDHVS:
             "number_of_cells": self.hvs_num_cells,
             "number_of_temperatures": self.hvs_num_temps,
             "tower_attributes": self.tower_attributes,
+            "state_action_list": self.state_action_list,
         }
