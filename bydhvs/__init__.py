@@ -510,14 +510,15 @@ class BYDHVS:
 
     async def poll(self) -> None:
         """Perform a polling cycle to retrieve data from the battery."""
+        if self.my_state == 0:
+            await self.close()
+            return  # Connection failed
+
         if self.my_state != 0:
             _LOGGER.warning("Already polling")
             return
         self.my_state = 1
         await self.connect()
-        if self.my_state == 0:
-            await self.close()
-            return  # Connection failed
 
         # State machine for polling process
         state_actions = {
