@@ -36,7 +36,7 @@ class BYDHVS:
 
     MAX_CELLS = 160
     MAX_TEMPS = 64
-    SLEEP_TIME = 3
+    SLEEP_TIME = 4
 
     def __init__(self, ip_address: str, port: int = 8080) -> None:
         """Initialize the BYDHVS communication class."""
@@ -92,6 +92,7 @@ class BYDHVS:
         self.max_cell_temp_cell = 0
         self.min_cell_temp_cell = 0
         self.current_tower = 0
+        self.state_action_list = []
 
 # Initialize the requests
 # self.my_requests = [
@@ -359,7 +360,9 @@ class BYDHVS:
         self.hvs_charge_total = self.buf2int32_us(data, 37) / 10
         self.hvs_discharge_total = self.buf2int32_us(data, 41) / 10
         if self.hvs_charge_total:
-            self.hvs_eta = self.hvs_discharge_total / self.hvs_charge_total
+            self.hvs_eta = (
+                100 * self.hvs_discharge_total / self.hvs_charge_total
+            )
         else:
             self.hvs_eta = 0
 
@@ -408,6 +411,7 @@ class BYDHVS:
         """Parse packet 5 containing cell voltage and balancing status."""
         tower = self.tower_attributes[tower_number]
 
+        tower['no'] = tower_number
         tower['max_cell_voltage_mv'] = self.buf2int16_si(data, 5)
         tower['min_cell_voltage_mv'] = self.buf2int16_si(data, 7)
         tower['max_cell_voltage_cell'] = data[9]
@@ -423,8 +427,10 @@ class BYDHVS:
 
         tower['charge_total'] = self.buf2int32_us(data, 33)
         tower['discharge_total'] = self.buf2int32_us(data, 37)
-        if tower['charge_total']:
-            tower['eta'] = tower['discharge_total'] / tower['charge_total']
+        if tower["charge_total"]:
+            tower["eta"] = (
+                100 * tower["discharge_total"] / tower["charge_total"]
+            )
         else:
             tower['eta'] = 0
         tower['battery_volt'] = round(self.buf2int16_si(data, 45) / 10.0, 1)
@@ -510,6 +516,7 @@ class BYDHVS:
         self.my_state = 1
         await self.connect()
         if self.my_state == 0:
+            await self.close()
             return  # Connection failed
 
         # State machine for polling process
@@ -532,6 +539,7 @@ class BYDHVS:
 
         while self.my_state != 0:
             action = state_actions.get(self.my_state)
+            self.state_action_list.append(self.my_state)
             if action:
                 await action()
             else:
@@ -552,8 +560,8 @@ class BYDHVS:
             # Initialize tower attributes after knowing hvsTowers
             self.tower_attributes = [{} for _ in range(self.hvs_towers or 1)]
             for tower in self.tower_attributes:
-                tower['cellVoltages'] = []
-                tower['cellTemperatures'] = []
+                tower['cell_voltages'] = []
+                tower['cell_temperatures'] = []
             self.my_state = 3
         else:
             _LOGGER.error("Invalid or no data received in state 2")
@@ -671,8 +679,6 @@ class BYDHVS:
         else:
             _LOGGER.error("Invalid or no data received in state 10")
             self.my_state = 0
-            await self.close()
-            return
 
     async def state11_send_request9(self) -> None:
         """Handle additional cells for more than 128 cells (e.g., 5 modules)"""
@@ -780,4 +786,5 @@ class BYDHVS:
             "number_of_cells": self.hvs_num_cells,
             "number_of_temperatures": self.hvs_num_temps,
             "tower_attributes": self.tower_attributes,
+            "state_action_list": self.state_action_list,
         }

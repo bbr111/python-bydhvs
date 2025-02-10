@@ -49,6 +49,7 @@ async def main():
         print(f"Battery Type        : {data['battery_type']}")
         print(f"Battery Type String : {data['battery_type_string']}")
         print(f"Inverter Type       : {data['inverter_type']}")
+        print(f"State Action List   : {data['state_action_list']}")
         for idx, tower in enumerate(data['tower_attributes']):
             print(f"\nTower {idx + 1}:")
             print(f"""  Max Cell Voltage (mV): {
