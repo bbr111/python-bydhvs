@@ -510,6 +510,7 @@ class BYDHVS:
         self.my_state = 1
         await self.connect()
         if self.my_state == 0:
+            await self.close()
             return  # Connection failed
 
         # State machine for polling process
@@ -671,8 +672,6 @@ class BYDHVS:
         else:
             _LOGGER.error("Invalid or no data received in state 10")
             self.my_state = 0
-            await self.close()
-            return
 
     async def state11_send_request9(self) -> None:
         """Handle additional cells for more than 128 cells (e.g., 5 modules)"""
