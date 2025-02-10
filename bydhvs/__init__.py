@@ -359,7 +359,9 @@ class BYDHVS:
         self.hvs_charge_total = self.buf2int32_us(data, 37) / 10
         self.hvs_discharge_total = self.buf2int32_us(data, 41) / 10
         if self.hvs_charge_total:
-            self.hvs_eta = self.hvs_discharge_total / self.hvs_charge_total
+            self.hvs_eta = (
+                100 * self.hvs_discharge_total / self.hvs_charge_total
+            )
         else:
             self.hvs_eta = 0
 
@@ -423,8 +425,10 @@ class BYDHVS:
 
         tower['charge_total'] = self.buf2int32_us(data, 33)
         tower['discharge_total'] = self.buf2int32_us(data, 37)
-        if tower['charge_total']:
-            tower['eta'] = tower['discharge_total'] / tower['charge_total']
+        if tower["charge_total"]:
+            tower["eta"] = (
+                100 * tower["discharge_total"] / tower["charge_total"]
+            )
         else:
             tower['eta'] = 0
         tower['battery_volt'] = round(self.buf2int16_si(data, 45) / 10.0, 1)
