@@ -553,8 +553,8 @@ class BYDHVS:
             # Initialize tower attributes after knowing hvsTowers
             self.tower_attributes = [{} for _ in range(self.hvs_towers or 1)]
             for tower in self.tower_attributes:
-                tower['cellVoltages'] = []
-                tower['cellTemperatures'] = []
+                tower['cell_voltages'] = []
+                tower['cell_temperatures'] = []
             self.my_state = 3
         else:
             _LOGGER.error("Invalid or no data received in state 2")
