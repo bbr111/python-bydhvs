@@ -42,8 +42,8 @@ class BYDHVS:
         """Initialize the BYDHVS communication class."""
         self._ip_address = ip_address
         self._port = port
-        self.reader: Optional[asyncio.StreamReader] = None
-        self.writer: Optional[asyncio.StreamWriter] = None
+        self._reader: Optional[asyncio.StreamReader] = None
+        self._writer: Optional[asyncio.StreamWriter] = None
         self._state = 0
 
         # Initialize battery parameters
@@ -210,7 +210,7 @@ class BYDHVS:
     async def _connect(self) -> None:
         """Establish a connection to the battery."""
         try:
-            self.reader, self.writer = await asyncio.open_connection(
+            self._reader, self._writer = await asyncio.open_connection(
                 self._ip_address, self._port
             )
             _LOGGER.debug("Connected to %s:%s", self._ip_address, self._port)
@@ -234,10 +234,10 @@ class BYDHVS:
 
     async def _send_request(self, request: bytes) -> None:
         """Send a request to the battery."""
-        if self.writer:
+        if self._writer:
             try:
-                self.writer.write(request)
-                await self.writer.drain()
+                self._writer.write(request)
+                await self._writer.drain()
                 _LOGGER.debug("Sent: %s", request.hex())
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 _LOGGER.error("Error sending data: %s", e)
@@ -247,10 +247,10 @@ class BYDHVS:
 
     async def _receive_response(self) -> Optional[bytes]:
         """Receive a response from the battery."""
-        if self.reader:
+        if self._reader:
             try:
                 data = await asyncio.wait_for(
-                    self.reader.read(1024), timeout=5
+                    self._reader.read(1024), timeout=5
                     )
                 _LOGGER.debug("Received: %s", data.hex())
                 return data
@@ -508,11 +508,11 @@ class BYDHVS:
 
     async def _close(self) -> None:
         """Close the connection to the battery."""
-        if self.writer:
-            self.writer.close()
-            await self.writer.wait_closed()
-            self.reader = None
-            self.writer = None
+        if self._writer:
+            self._writer.close()
+            await self._writer.wait_closed()
+            self._reader = None
+            self._writer = None
             _LOGGER.debug("Connection closed")
 
     async def poll(self) -> None:
