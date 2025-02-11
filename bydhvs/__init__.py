@@ -184,26 +184,50 @@ class BYDHVS:
         ]
 
         self.my_inverters = [
-            "Fronius HV",  # 0
-            "Goodwe HV",  # 1
-            "Fronius HV",  # 2
-            "Kostal HV",  # 3
-            "Goodwe HV",  # 4
+            "Fronius HV",      # 0
+            "Goodwe HV",       # 1
+            "Fronius HV",      # 2
+            "Kostal HV",       # 3
+            "Goodwe HV",       # 4
             "SMA SBS3.7/5.0",  # 5
-            "Kostal HV",  # 6
+            "Kostal HV",       # 6
             "SMA SBS3.7/5.0",  # 7
-            "Sungrow HV",  # 8
-            "Sungrow HV",  # 9
-            "Kaco HV",  # 10
-            "Kaco HV",  # 11
-            "Ingeteam HV",  # 12
-            "Ingeteam HV",  # 13
+            "Sungrow HV",      # 8
+            "Sungrow HV",      # 9
+            "Kaco HV",         # 10
+            "Kaco HV",         # 11
+            "Ingeteam HV",     # 12
+            "Ingeteam HV",     # 13
             "SMA SBS 2.5 HV",  # 14
-            "undefined",  # 15
+            "undefined",       # 15
             "SMA SBS 2.5 HV",  # 16
-            "Fronius HV",  # 17
-            "undefined",  # 18
-            "SMA STP",  # 19
+            "Fronius HV",      # 17
+            "undefined",       # 18
+            "SMA STP",         # 19
+        ]
+
+        self.my_lvs_inverters = [
+            'Fronius HV',
+            'Goodwe HV',
+            'Goodwe HV',
+            'Kostal HV',
+            'Selectronic LV',
+            'SMA SBS3.7/5.0',
+            'SMA LV',
+            'Victron LV',
+            'Suntech LV',
+            'Sungrow HV',
+            'Kaco HV',
+            'Studer LV',
+            'Solar Edge LV',
+            'Ingeteam HV',
+            'Sungrow LV',
+            'Schneider LV',
+            'SMA SBS2.5 HV',
+            'Solar Edge LV',
+            'Solar Edge LV',
+            'Solar Edge LV',
+            'unknown',
         ]
 
     async def connect(self) -> None:
@@ -373,7 +397,7 @@ class BYDHVS:
 
         # Map battery type to module and cell counts
         batt_type_map = {
-            0: {'string': 'LVM', 'cell_count': 0, 'temp_count': 0},
+            0: {'string': 'LVS', 'cell_count': 0, 'temp_count': 0},
             1: {'string': 'HVM', 'cell_count': 16, 'temp_count': 8},
             2: {'string': 'HVS', 'cell_count': 32, 'temp_count': 12},
         }
@@ -385,17 +409,23 @@ class BYDHVS:
         self.hvs_num_cells = self.hvs_modules * self.hvs_module_cell_count
         self.hvs_num_temps = self.hvs_modules * self.hvs_module_cell_temp_count
 
+        if self.hvs_inv_type < len(self.my_inverters):
+            self.hvs_inv_type_string = self.my_inverters[self.hvs_inv_type]
+        else:
+            self.hvs_inv_type_string = "undefined"
+
         if self.hvs_batt_type_from_serial == "LVS":
             self.hvs_batt_type = "LVS"
             self.hvs_module_cell_count = 7
             self.hvs_num_cells = self.hvs_modules * 7
             self.hvs_num_temps = 0
             self.hvs_module_cell_temp_count = 0
-
-        if self.hvs_inv_type < len(self.my_inverters):
-            self.hvs_inv_type_string = self.my_inverters[self.hvs_inv_type]
-        else:
-            self.hvs_inv_type_string = "undefined"
+            if self.hvs_inv_type < len(self.my_lvs_inverters):
+                self.hvs_inv_type_string = (
+                    self.my_lvs_inverters[self.hvs_inv_type]
+                    )
+            else:
+                self.hvs_inv_type_string = "undefined"
 
         self.hvs_num_cells = min(self.hvs_num_cells, self.MAX_CELLS)
         self.hvs_num_temps = min(self.hvs_num_temps, self.MAX_TEMPS)
