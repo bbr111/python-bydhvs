@@ -84,9 +84,6 @@ async def main():
 
     except BYDHVSError as e:
         print(f"An error occurred: {e}")
-    finally:
-        # Ensure the connection is closed properly
-        await battery.close()
 
 if __name__ == '__main__':
     asyncio.run(main())
