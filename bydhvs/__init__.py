@@ -393,10 +393,12 @@ class BYDHVS:
 
         if self.hvs_batt_type_from_serial == "LVS":
             self.hvs_batt_type = "LVS"
-            self.hvs_module_cell_count = 7
-            self.hvs_num_cells = self.hvs_modules * 7
-            self.hvs_num_temps = 0
-            self.hvs_module_cell_temp_count = 0
+            self.hvs_module_cell_count = 8
+            self.hvs_module_cell_temp_count = 4
+            self.hvs_num_cells = self.hvs_modules * self.hvs_module_cell_count
+            self.hvs_num_temps = (
+                self.hvs_modules * self.hvs_module_cell_temp_count
+            )
             if self.hvs_inv_type < len(self._lvs_inverters):
                 self.hvs_inv_type_string = (
                     self._lvs_inverters[self.hvs_inv_type]
