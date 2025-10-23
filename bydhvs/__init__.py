@@ -434,8 +434,8 @@ class BYDHVS:
         tower['balancing_status'] = data[17:33].hex()
         tower['balancing_count'] = bin(int(data[17:33].hex(), 16)).count('1')
 
-        tower['charge_total'] = self._buf2int32_us(data, 33)
-        tower['discharge_total'] = self._buf2int32_us(data, 37)
+        tower['charge_total'] = self._buf2int32_us(data, 33) / 1000
+        tower['discharge_total'] = self._buf2int32_us(data, 37) / 1000
         if tower["charge_total"]:
             tower["eta"] = (
                 100 * tower["discharge_total"] / tower["charge_total"]
