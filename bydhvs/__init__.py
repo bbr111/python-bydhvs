@@ -418,6 +418,13 @@ class BYDHVS:
 
     def _parse_packet5(self, data: bytes, tower_number=0) -> None:
         """Parse packet 5 containing cell voltage and balancing status."""
+        if len(data) < 133:
+            _LOGGER.warning(
+                "Packet 5 too short for tower %d (len=%d): %s",
+                tower_number, len(data), data.hex()
+            )
+            return  # Skip parsing if data is too short
+
         tower = self.tower_attributes[tower_number]
 
         tower['no'] = tower_number
@@ -526,38 +533,46 @@ class BYDHVS:
         self.current_tower = 0
         self.state_action_list = []
 
-        await self._connect()
+        try:
+            await self._connect()
 
-        # State machine for polling process
-        state_actions = {
-            2: self._state2_send_request0,
-            3: self._state3_send_request1,
-            4: self._state4_send_request2,
-            5: self._state5_start_measurement,
-            6: self._state6_send_request4,
-            7: self._state7_send_request5,
-            8: self._state8_send_request6,
-            9: self._state9_send_request7,
-            10: self._state10_send_request8,
-            11: self._state11_send_request9,
-            12: self._state12_send_request10,
-            13: self._state13_send_request11,
-            14: self._state14_send_request12,
-            15: self._state15_send_request13,
-        }
+            # State machine for polling process
+            state_actions = {
+                2: self._state2_send_request0,
+                3: self._state3_send_request1,
+                4: self._state4_send_request2,
+                5: self._state5_start_measurement,
+                6: self._state6_send_request4,
+                7: self._state7_send_request5,
+                8: self._state8_send_request6,
+                9: self._state9_send_request7,
+                10: self._state10_send_request8,
+                11: self._state11_send_request9,
+                12: self._state12_send_request10,
+                13: self._state13_send_request11,
+                14: self._state14_send_request12,
+                15: self._state15_send_request13,
+            }
 
-        while self._state != 0:
-            action = state_actions.get(self._state)
-            self.state_action_list.append(self._state)
-            if action:
-                await action()
-            else:
-                _LOGGER.error("Unknown state: %s", self._state)
-                self._state = 0
+            while self._state != 0:
+                action = state_actions.get(self._state)
+                self.state_action_list.append(self._state)
+                if action:
+                    await action()
+                else:
+                    _LOGGER.error("Unknown state: %s", self._state)
+                    self._state = 0
 
-        # Close the connection
-        await self._close()
-        self._state = 0
+        except Exception as e:
+            _LOGGER.error("Error during polling: %s", e, exc_info=True)
+            raise
+        finally:
+            try:
+                await self._close()
+            except (OSError, ConnectionResetError,
+                    asyncio.IncompleteReadError, asyncio.CancelledError) as e:
+                _LOGGER.debug("Error closing connection: %s", e)
+            self._state = 0
 
     async def _state2_send_request0(self) -> None:
         """State 2: Send request 0 and parse packet 0."""
@@ -635,11 +650,38 @@ class BYDHVS:
             self._requests['read_cell_volt_temp']
             )
         data = await self._receive_response()
-        if data and self._check_packet(data):
-            self._parse_packet5(data, self.current_tower)
-            self._state = 8
+
+        if data:
+            if self._check_packet(data):
+                self._parse_packet5(data, self.current_tower)
+
+                tower = self.tower_attributes[self.current_tower]
+                if 'balancing_status' not in tower:
+                    _LOGGER.warning(
+                        "Tower %d parsed, but balancing_status missing "
+                        "(keys: %s)",
+                        self.current_tower,
+                        list(tower.keys())
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Tower %d parsed successfully (balancing_status=%s)",
+                        self.current_tower,
+                        tower['balancing_status']
+                    )
+                self._state = 8
+            else:
+                _LOGGER.error(
+                    "Invalid CRC or malformed packet in state 7 for "
+                    "tower %d (len=%d)",
+                    self.current_tower, len(data)
+                )
+                self._state = 0
         else:
-            _LOGGER.error("Invalid or no data received in state 7")
+            _LOGGER.error(
+                "No data received in state 7 for tower %d",
+                self.current_tower
+            )
             self._state = 0
 
     async def _state8_send_request6(self) -> None:
