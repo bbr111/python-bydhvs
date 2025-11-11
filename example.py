@@ -68,6 +68,7 @@ async def main():
                   tower.get('min_cell_temp_cell')}""")
             print(f"  Balancing Status      : {tower.get('balancing_status')}")
             print(f"  Balancing Count       : {tower.get('balancing_count')}")
+            print(f"  Current               : {tower.get('current')} A")
             print(f"  Total Charge          : {tower.get('charge_total')} kWh")
             print(f"""  Discharge Total       : {
                 tower.get('discharge_total')} kWh""")
