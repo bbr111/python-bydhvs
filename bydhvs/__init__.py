@@ -432,8 +432,8 @@ class BYDHVS:
         tower['min_cell_voltage_mv'] = self._buf2int16_si(data, 7)
         tower['max_cell_voltage_cell'] = data[9]
         tower['min_cell_voltage_cell'] = data[10]
-        tower['max_cell_temp'] = data[12]
-        tower['min_cell_temp'] = data[14]
+        tower['max_cell_temp'] = self._buf2int16_si(data, 11)
+        tower['min_cell_temp'] = self._buf2int16_si(data, 13)
         tower['max_cell_temp_cell'] = data[15]
         tower['min_cell_temp_cell'] = data[16]
 
@@ -455,6 +455,7 @@ class BYDHVS:
             self._buf2int16_si(data, 53) / 10.0, 1
             )
         tower['soh'] = round(self._buf2int16_si(data, 55), 1)
+        tower['current'] = round(self._buf2int16_si(data, 57) / 10.0, 1)
         tower['state'] = f"{data[59]}{data[60]}"
         # tower['state_string'] = self.stat_tower[tower['state']]
 
