@@ -37,6 +37,7 @@ class BYDHVS:
     MAX_CELLS = 160
     MAX_TEMPS = 64
     SLEEP_TIME = 4
+    READ_TIMEOUT = 15
 
     def __init__(self, ip_address: str, port: int = 8080) -> None:
         """Initialize the BYDHVS communication class."""
@@ -250,7 +251,7 @@ class BYDHVS:
         if self._reader:
             try:
                 data = await asyncio.wait_for(
-                    self._reader.read(1024), timeout=5
+                    self._reader.read(1024), timeout=self.READ_TIMEOUT
                     )
                 _LOGGER.debug("Received: %s", data.hex())
                 return data
