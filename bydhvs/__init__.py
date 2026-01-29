@@ -8,12 +8,39 @@ data for use in Home Assistant.
 
 import asyncio
 import logging
-
+from dataclasses import dataclass
+from enum import Enum
 from typing import Optional, Dict, List
 
 import crcmod
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class BatteryType(Enum):
+    """Battery type enumeration."""
+    LVS = "LVS"
+    HVM = "HVM"
+    HVS = "HVS"
+    UNKNOWN = "Unknown"
+
+
+class GridType(Enum):
+    """Grid type enumeration."""
+    OFFGRID = "OffGrid"
+    ONGRID = "OnGrid"
+    BACKUP = "Backup"
+    UNKNOWN = "Unknown"
+
+
+@dataclass
+class BatteryConfig:
+    """Configuration for a battery type."""
+    type_name: str
+    cell_count_per_module: int
+    temp_count_per_module: int
+    hardware_codes: tuple
+    inverter_list: List[str]
 
 
 class BYDHVSError(Exception):
@@ -31,17 +58,92 @@ class BYDHVSTimeoutError(BYDHVSError):
 CRC16 = crcmod.predefined.mkCrcFun('modbus')
 
 
+# Battery configuration constants
+BATTERY_CONFIGS = {
+    BatteryType.LVS: BatteryConfig(
+        type_name="LVS",
+        cell_count_per_module=8,
+        temp_count_per_module=4,
+        hardware_codes=(49, 50),  # Hardware type codes from serial
+        inverter_list=[
+            'Fronius HV', 'Goodwe HV', 'Goodwe HV', 'Kostal HV',
+            'Selectronic LV', 'SMA SBS3.7/5.0', 'SMA LV', 'Victron LV',
+            'Suntech LV', 'Sungrow HV', 'Kaco HV', 'Studer LV',
+            'Solar Edge LV', 'Ingeteam HV', 'Sungrow LV', 'Schneider LV',
+            'SMA SBS2.5 HV', 'Solar Edge LV', 'Solar Edge LV', 'Solar Edge LV',
+            'unknown',
+        ]
+    ),
+    BatteryType.HVM: BatteryConfig(
+        type_name="HVM",
+        cell_count_per_module=16,
+        temp_count_per_module=8,
+        hardware_codes=(),  # Determined by data[5] == 1
+        inverter_list=[
+            "Fronius HV", "Goodwe HV", "Fronius HV", "Kostal HV",
+            "Goodwe HV", "SMA SBS3.7/5.0", "Kostal HV", "SMA SBS3.7/5.0",
+            "Sungrow HV", "Sungrow HV", "Kaco HV", "Kaco HV",
+            "Ingeteam HV", "Ingeteam HV", "SMA SBS 2.5 HV", "undefined",
+            "SMA SBS 2.5 HV", "Fronius HV", "undefined", "SMA STP",
+        ]
+    ),
+    BatteryType.HVS: BatteryConfig(
+        type_name="HVS",
+        cell_count_per_module=32,
+        temp_count_per_module=12,
+        hardware_codes=(51,),  # Hardware type code from serial
+        inverter_list=[
+            "Fronius HV", "Goodwe HV", "Fronius HV", "Kostal HV",
+            "Goodwe HV", "SMA SBS3.7/5.0", "Kostal HV", "SMA SBS3.7/5.0",
+            "Sungrow HV", "Sungrow HV", "Kaco HV", "Kaco HV",
+            "Ingeteam HV", "Ingeteam HV", "SMA SBS 2.5 HV", "undefined",
+            "SMA SBS 2.5 HV", "Fronius HV", "undefined", "SMA STP",
+        ]
+    ),
+}
+
+# Grid type mapping
+GRID_TYPE_MAP = {
+    0: GridType.OFFGRID,
+    1: GridType.ONGRID,
+    2: GridType.BACKUP,
+}
+
+
 class BYDHVS:
     """Class to communicate with the BYD HVS Battery system."""
-
+    # Hardware limits
     MAX_CELLS = 160
     MAX_TEMPS = 64
+    # Communication settings
     SLEEP_TIME = 4
     READ_TIMEOUT = 15
+    BUFFER_SIZE = 1024
+    # Packet structure constants
+    MIN_PACKET_LENGTH = 5
+    PACKET_HEADER_SIZE = 3
+    PACKET_CRC_SIZE = 2
+    PACKET5_MIN_LENGTH = 133
+    MODBUS_ADDRESS = 1
+    FUNCTION_CODE_READ = 3
+    FUNCTION_CODE_WRITE = 16
 
     def __init__(self, ip_address: str, port: int = 8080) -> None:
-        """Initialize the BYDHVS communication class."""
-        self._ip_address = ip_address
+        """Initialize the BYDHVS communication class.
+
+        Args:
+            ip_address: IP address of the BYD HVS Battery system
+            port: TCP port number (default: 8080)
+
+        Raises:
+            ValueError: If ip_address is empty or port is out of valid range
+        """
+        if not ip_address or not ip_address.strip():
+            raise ValueError("IP address cannot be empty")
+        if not 1 <= port <= 65535:
+            raise ValueError(f"Port must be between 1 and 65535, got {port}")
+
+        self._ip_address = ip_address.strip()
         self._port = port
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -161,55 +263,18 @@ class BYDHVS:
             "AirSwitch Abnormal"                            # Bit 15
         ]
 
-        self._inverters = [
-            "Fronius HV",      # 0
-            "Goodwe HV",       # 1
-            "Fronius HV",      # 2
-            "Kostal HV",       # 3
-            "Goodwe HV",       # 4
-            "SMA SBS3.7/5.0",  # 5
-            "Kostal HV",       # 6
-            "SMA SBS3.7/5.0",  # 7
-            "Sungrow HV",      # 8
-            "Sungrow HV",      # 9
-            "Kaco HV",         # 10
-            "Kaco HV",         # 11
-            "Ingeteam HV",     # 12
-            "Ingeteam HV",     # 13
-            "SMA SBS 2.5 HV",  # 14
-            "undefined",       # 15
-            "SMA SBS 2.5 HV",  # 16
-            "Fronius HV",      # 17
-            "undefined",       # 18
-            "SMA STP",         # 19
-        ]
-
-        self._lvs_inverters = [
-            'Fronius HV',
-            'Goodwe HV',
-            'Goodwe HV',
-            'Kostal HV',
-            'Selectronic LV',
-            'SMA SBS3.7/5.0',
-            'SMA LV',
-            'Victron LV',
-            'Suntech LV',
-            'Sungrow HV',
-            'Kaco HV',
-            'Studer LV',
-            'Solar Edge LV',
-            'Ingeteam HV',
-            'Sungrow LV',
-            'Schneider LV',
-            'SMA SBS2.5 HV',
-            'Solar Edge LV',
-            'Solar Edge LV',
-            'Solar Edge LV',
-            'unknown',
-        ]
+        # Battery configuration (set during parsing)
+        self._battery_config: Optional[BatteryConfig] = None
 
     async def _connect(self) -> None:
-        """Establish a connection to the battery."""
+        """Establish a connection to the battery.
+
+        Opens an async TCP connection to the battery system.
+
+        Raises:
+            BYDHVSTimeoutError: If connection times out
+            BYDHVSConnectionError: If OS-level connection error occurs
+        """
         try:
             self._reader, self._writer = await asyncio.open_connection(
                 self._ip_address, self._port
@@ -234,7 +299,14 @@ class BYDHVS:
             ) from e
 
     async def _send_request(self, request: bytes) -> None:
-        """Send a request to the battery."""
+        """Send a request to the battery.
+
+        Args:
+            request: Raw bytes to send over TCP connection
+
+        Note:
+            Sets state to 0 on connection errors
+        """
         if self._writer:
             try:
                 self._writer.write(request)
@@ -247,11 +319,19 @@ class BYDHVS:
             _LOGGER.error("No connection available")
 
     async def _receive_response(self) -> Optional[bytes]:
-        """Receive a response from the battery."""
+        """Receive a response from the battery.
+
+        Returns:
+            Response bytes if successful, None on timeout or error
+
+        Note:
+            Sets state to 0 on errors and returns None
+        """
         if self._reader:
             try:
                 data = await asyncio.wait_for(
-                    self._reader.read(1024), timeout=self.READ_TIMEOUT
+                    self._reader.read(self.BUFFER_SIZE),
+                    timeout=self.READ_TIMEOUT
                     )
                 _LOGGER.debug("Received: %s", data.hex())
                 return data
@@ -269,18 +349,30 @@ class BYDHVS:
         return None
 
     def _check_packet(self, data: bytes) -> bool:
-        """Check if the received packet is valid."""
-        if len(data) < 5:
+        """Check if the received packet is valid.
+
+        Validates packet structure and CRC checksum.
+
+        Args:
+            data: Raw packet bytes received from battery
+
+        Returns:
+            True if packet valid (correct structure and CRC), False otherwise
+        """
+        if len(data) < self.MIN_PACKET_LENGTH:
             return False
-        if data[0] != 1:
+        if data[0] != self.MODBUS_ADDRESS:
             return False
         function_code = data[1]
         data_length = data[2]
-        packet_length = data_length + 5  # 3 Header, 2 CRC
-        if function_code == 3:
+        packet_length = (
+            data_length + self.PACKET_HEADER_SIZE + self.PACKET_CRC_SIZE
+        )
+
+        if function_code == self.FUNCTION_CODE_READ:
             if packet_length != len(data):
                 return False
-        elif function_code != 16:
+        elif function_code != self.FUNCTION_CODE_WRITE:
             return False
         crc = CRC16(data)
         return crc == 0
@@ -309,12 +401,14 @@ class BYDHVS:
         """Parse packet 0 containing serial number and firmware versions."""
         self.hvs_serial = data[3:22].decode('ascii').strip()
 
-        # Hardware type
+        # Detect battery type from hardware code in serial
         hardware_type = data[5]
-        if hardware_type == 51:
-            self.hvs_batt_type_from_serial = "HVS"
-        elif hardware_type in (49, 50):
-            self.hvs_batt_type_from_serial = "LVS"
+        self.hvs_batt_type_from_serial = BatteryType.UNKNOWN.value
+
+        for batt_type, config in BATTERY_CONFIGS.items():
+            if hardware_type in config.hardware_codes:
+                self.hvs_batt_type_from_serial = batt_type.value
+                break
 
         # Firmware versions
         self.hvs_bmu_a = f"V{data[27]}.{data[28]}"
@@ -330,8 +424,8 @@ class BYDHVS:
         self.hvs_towers = data[36] // 16
 
         # Grid type
-        grid_type_map = {0: "OffGrid", 1: "OnGrid", 2: "Backup"}
-        self.hvs_grid = grid_type_map.get(data[38], "Unknown")
+        grid_type_enum = GRID_TYPE_MAP.get(data[38], GridType.UNKNOWN)
+        self.hvs_grid = grid_type_enum.value
 
     def _parse_packet1(self, data: bytes) -> None:
         """Parse packet 1 containing battery status information."""
@@ -370,56 +464,75 @@ class BYDHVS:
 
     def _parse_packet2(self, data: bytes) -> None:
         """Parse packet 2 containing battery type and inverter information."""
-        self.hvs_batt_type = data[5]
+        batt_type_code = data[5]
         self.hvs_inv_type = data[3]
 
-        # Map battery type to module and cell counts
-        batt_type_map = {
-            0: {'string': 'LVS', 'cell_count': 0, 'temp_count': 0},
-            1: {'string': 'HVM', 'cell_count': 16, 'temp_count': 8},
-            2: {'string': 'HVS', 'cell_count': 32, 'temp_count': 12},
-        }
+        # Map battery type code to enum
+        type_map = {0: BatteryType.LVS, 1: BatteryType.HVM, 2: BatteryType.HVS}
+        detected_type = type_map.get(batt_type_code, BatteryType.UNKNOWN)
 
-        batt_info = batt_type_map.get(self.hvs_batt_type, {})
-        self.hvs_batt_type_string = batt_info.get('string', '')
-        self.hvs_module_cell_count = batt_info.get('cell_count', 0)
-        self.hvs_module_cell_temp_count = batt_info.get('temp_count', 0)
+        # Override with serial detection for LVS (more reliable)
+        if self.hvs_batt_type_from_serial == BatteryType.LVS.value:
+            detected_type = BatteryType.LVS
+
+        # Get configuration for detected type
+        self._battery_config = BATTERY_CONFIGS.get(
+            detected_type,
+            BATTERY_CONFIGS[BatteryType.HVS]  # Default to HVS
+        )
+
+        # Set battery type information
+        self.hvs_batt_type = detected_type.value
+        self.hvs_batt_type_string = self._battery_config.type_name
+        self.hvs_module_cell_count = (
+            self._battery_config.cell_count_per_module
+        )
+        self.hvs_module_cell_temp_count = (
+            self._battery_config.temp_count_per_module
+        )
+
+        # Calculate totals
         self.hvs_num_cells = self.hvs_modules * self.hvs_module_cell_count
         self.hvs_num_temps = self.hvs_modules * self.hvs_module_cell_temp_count
 
-        if self.hvs_inv_type < len(self._inverters):
-            self.hvs_inv_type_string = self._inverters[self.hvs_inv_type]
-        else:
-            self.hvs_inv_type_string = "undefined"
-
-        if self.hvs_batt_type_from_serial == "LVS":
-            self.hvs_batt_type = "LVS"
-            self.hvs_module_cell_count = 8
-            self.hvs_module_cell_temp_count = 4
-            self.hvs_num_cells = self.hvs_modules * self.hvs_module_cell_count
-            self.hvs_num_temps = (
-                self.hvs_modules * self.hvs_module_cell_temp_count
-            )
-            if self.hvs_inv_type < len(self._lvs_inverters):
-                self.hvs_inv_type_string = (
-                    self._lvs_inverters[self.hvs_inv_type]
-                    )
-            else:
-                self.hvs_inv_type_string = "undefined"
-
+        # Apply limits
         self.hvs_num_cells = min(self.hvs_num_cells, self.MAX_CELLS)
         self.hvs_num_temps = min(self.hvs_num_temps, self.MAX_TEMPS)
 
+        # Get inverter type string from configuration
+        inverter_list = self._battery_config.inverter_list
+        if 0 <= self.hvs_inv_type < len(inverter_list):
+            self.hvs_inv_type_string = inverter_list[self.hvs_inv_type]
+        else:
+            self.hvs_inv_type_string = "undefined"
+
         _LOGGER.debug(
-            "Number of cells: %s, Number of temperatures: %s, Modules: %s",
+            "Battery: %s, Cells: %s, Temps: %s, Modules: %s",
+            self.hvs_batt_type_string,
             self.hvs_num_cells,
             self.hvs_num_temps,
             self.hvs_modules,
         )
 
-    def _parse_packet5(self, data: bytes, tower_number=0) -> None:
+    @property
+    def battery_type(self) -> BatteryType:
+        """Get the battery type as enum."""
+        if self.hvs_batt_type == "LVS":
+            return BatteryType.LVS
+        elif self.hvs_batt_type == "HVM":
+            return BatteryType.HVM
+        elif self.hvs_batt_type == "HVS":
+            return BatteryType.HVS
+        return BatteryType.UNKNOWN
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if currently connected to battery."""
+        return self._writer is not None and not self._writer.is_closing()
+
+    def _parse_packet5(self, data: bytes, tower_number: int = 0) -> None:
         """Parse packet 5 containing cell voltage and balancing status."""
-        if len(data) < 133:
+        if len(data) < self.PACKET5_MIN_LENGTH:
             _LOGGER.warning(
                 "Packet 5 too short for tower %d (len=%d): %s",
                 tower_number, len(data), data.hex()
@@ -473,7 +586,7 @@ class BYDHVS:
             self._buf2int16_si(data, 101 + i * 2) for i in range(16)
         ]
 
-    def _parse_packet6(self, data: bytes, tower_number=0) -> None:
+    def _parse_packet6(self, data: bytes, tower_number: int = 0) -> None:
         """Parse packet 6 containing additional cell voltages."""
         tower = self.tower_attributes[tower_number]
         max_cells = min(self.hvs_num_cells - 16, 64)
@@ -481,7 +594,7 @@ class BYDHVS:
             self._buf2int16_si(data, 5 + i * 2) for i in range(max_cells)
         ])
 
-    def _parse_packet7(self, data: bytes, tower_number=0) -> None:
+    def _parse_packet7(self, data: bytes, tower_number: int = 0) -> None:
         """Parse packet 7 containing more cell voltages and temperatures."""
         tower = self.tower_attributes[tower_number]
         max_cells = min(self.hvs_num_cells - 80, 48)
@@ -492,13 +605,13 @@ class BYDHVS:
         max_temps = min(self.hvs_num_temps, 30)
         tower['cell_temperatures'] = list(data[103:103 + max_temps])
 
-    def _parse_packet8(self, data: bytes, tower_number=0) -> None:
+    def _parse_packet8(self, data: bytes, tower_number: int = 0) -> None:
         """Parse packet 8 containing additional cell temperatures."""
         tower = self.tower_attributes[tower_number]
         max_temps = min(self.hvs_num_temps - 30, 34)
         tower['cell_temperatures'].extend(list(data[5:5 + max_temps]))
 
-    def _parse_packet12(self, data: bytes, tower_number=0) -> None:
+    def _parse_packet12(self, data: bytes, tower_number: int = 0) -> None:
         """Parse packet 12 for systems with more than 128 cells."""
         tower = self.tower_attributes[tower_number]
         balancing_data = int.from_bytes(data[17:33], 'big')
@@ -508,7 +621,7 @@ class BYDHVS:
             self._buf2int16_si(data, 101 + i * 2) for i in range(16)
         ])
 
-    def _parse_packet13(self, data: bytes, tower_number=0) -> None:
+    def _parse_packet13(self, data: bytes, tower_number: int = 0) -> None:
         """Parse packet 13 for systems with more than 144 cells."""
         tower = self.tower_attributes[tower_number]
         start_cell = 144
@@ -526,8 +639,54 @@ class BYDHVS:
             self._writer = None
             _LOGGER.debug("Connection closed")
 
+    async def _send_and_receive(
+        self,
+        request: bytes,
+        state_name: str
+    ) -> Optional[bytes]:
+        """Send request and receive response with error handling.
+
+        Args:
+            request: The request bytes to send
+            state_name: Name of the current state for logging
+
+        Returns:
+            Response data if successful, None otherwise
+        """
+        await self._send_request(request)
+        data = await self._receive_response()
+        if data and self._check_packet(data):
+            return data
+        _LOGGER.error("Invalid or no data received in %s", state_name)
+        self._state = 0
+        return None
+
+    async def __aenter__(self) -> 'BYDHVS':
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
+        """Async context manager exit - ensures connection is closed."""
+        await self._close()
+        return False
+
     async def poll(self) -> None:
-        """Perform a polling cycle to retrieve data from the battery."""
+        """Perform a polling cycle to retrieve data from the battery.
+
+        Executes a full state machine cycle to:
+        1. Connect to battery
+        2. Read serial number and firmware versions
+        3. Read battery status and configuration
+        4. Read detailed cell voltages and temperatures for all towers
+
+        Raises:
+            BYDHVSConnectionError: If connection fails
+            BYDHVSTimeoutError: If communication times out
+            BYDHVSError: For other battery communication errors
+
+        Note:
+            Call get_data() after successful poll() to retrieve collected data
+        """
         if self._state != 0:
             _LOGGER.warning("Already polling")
             return
@@ -578,9 +737,10 @@ class BYDHVS:
 
     async def _state2_send_request0(self) -> None:
         """State 2: Send request 0 and parse packet 0."""
-        await self._send_request(self._requests['read_serial_number'])
-        data = await self._receive_response()
-        if data and self._check_packet(data):
+        data = await self._send_and_receive(
+            self._requests['read_serial_number'], 'state 2'
+        )
+        if data:
             self._parse_packet0(data)
 
             # Initialize tower attributes after knowing hvsTowers
@@ -589,35 +749,28 @@ class BYDHVS:
                 tower['cell_voltages'] = []
                 tower['cell_temperatures'] = []
             self._state = 3
-        else:
-            _LOGGER.error("Invalid or no data received in state 2")
-            self._state = 0
 
     async def _state3_send_request1(self) -> None:
         """State 3: Send request 1 and parse packet 1."""
-        await self._send_request(self._requests['read_status_information'])
-        data = await self._receive_response()
-        if data and self._check_packet(data):
+        data = await self._send_and_receive(
+            self._requests['read_status_information'], 'state 3'
+        )
+        if data:
             self._parse_packet1(data)
             self._state = 4
-        else:
-            _LOGGER.error("Invalid or no data received in state 3")
-            self._state = 0
 
     async def _state4_send_request2(self) -> None:
         """State 4: Send request 2 and parse packet 2."""
-        await self._send_request(self._requests['read_battery_info'])
-        data = await self._receive_response()
-        if data and self._check_packet(data):
+        data = await self._send_and_receive(
+            self._requests['read_battery_info'], 'state 4'
+        )
+        if data:
             self._parse_packet2(data)
             # Decide whether to continue with detailed query
             if self.hvs_num_cells > 0 and self.hvs_num_temps > 0:
                 self._state = 5
             else:
                 self._state = 0  # End polling if no detailed data available
-        else:
-            _LOGGER.error("Invalid or no data received in state 4")
-            self._state = 0
 
     async def _state5_start_measurement(self) -> None:
         """State 5: Start measurement and proceed with detailed queries."""
@@ -638,87 +791,60 @@ class BYDHVS:
 
     async def _state6_send_request4(self) -> None:
         """State 6: Send request 4"""
-        await self._send_request(self._requests['read_measurement_status'])
-        data = await self._receive_response()
-        if data and self._check_packet(data):
+        data = await self._send_and_receive(
+            self._requests['read_measurement_status'], 'state 6'
+        )
+        if data:
             self._state = 7
-        else:
-            _LOGGER.error("Invalid or no data received in state 6")
-            self._state = 0
 
     async def _state7_send_request5(self) -> None:
         """State 7: Send request 5 and parse with parse_packet5 for tower 0"""
-        await self._send_request(
-            self._requests['read_cell_volt_temp']
-            )
-        data = await self._receive_response()
-
+        data = await self._send_and_receive(
+            self._requests['read_cell_volt_temp'], 'state 7'
+        )
         if data:
-            if self._check_packet(data):
-                self._parse_packet5(data, self.current_tower)
+            self._parse_packet5(data, self.current_tower)
 
-                tower = self.tower_attributes[self.current_tower]
-                if 'balancing_status' not in tower:
-                    _LOGGER.warning(
-                        "Tower %d parsed, but balancing_status missing "
-                        "(keys: %s)",
-                        self.current_tower,
-                        list(tower.keys())
-                    )
-                else:
-                    _LOGGER.debug(
-                        "Tower %d parsed successfully (balancing_status=%s)",
-                        self.current_tower,
-                        tower['balancing_status']
-                    )
-                self._state = 8
-            else:
-                _LOGGER.error(
-                    "Invalid CRC or malformed packet in state 7 for "
-                    "tower %d (len=%d)",
-                    self.current_tower, len(data)
+            tower = self.tower_attributes[self.current_tower]
+            if 'balancing_status' not in tower:
+                _LOGGER.warning(
+                    "Tower %d parsed, but balancing_status missing "
+                    "(keys: %s)",
+                    self.current_tower,
+                    list(tower.keys())
                 )
-                self._state = 0
-        else:
-            _LOGGER.error(
-                "No data received in state 7 for tower %d",
-                self.current_tower
-            )
-            self._state = 0
+            else:
+                _LOGGER.debug(
+                    "Tower %d parsed successfully (balancing_status=%s)",
+                    self.current_tower,
+                    tower['balancing_status']
+                )
+            self._state = 8
 
     async def _state8_send_request6(self) -> None:
         """ State 8: Send request 6 and parse with parse_packet6 for tower 0"""
-        await self._send_request(
-            self._requests['read_cell_volt_temp']
-            )
-        data = await self._receive_response()
-        if data and self._check_packet(data):
+        data = await self._send_and_receive(
+            self._requests['read_cell_volt_temp'], 'state 8'
+        )
+        if data:
             self._parse_packet6(data, self.current_tower)
             self._state = 9
-        else:
-            _LOGGER.error("Invalid or no data received in state 8")
-            self._state = 0
 
     async def _state9_send_request7(self) -> None:
         """State 9: Send request 7 and parse with parse_packet7 for tower 0"""
-        await self._send_request(
-            self._requests['read_cell_volt_temp']
-            )
-        data = await self._receive_response()
-        if data and self._check_packet(data):
+        data = await self._send_and_receive(
+            self._requests['read_cell_volt_temp'], 'state 9'
+        )
+        if data:
             self._parse_packet7(data, self.current_tower)
             self._state = 10
-        else:
-            _LOGGER.error("Invalid or no data received in state 9")
-            self._state = 0
 
     async def _state10_send_request8(self) -> None:
         """State 10: Send request 8 and parse with parse_packet8 for tower 0"""
-        await self._send_request(
-            self._requests['read_cell_volt_temp']
-            )
-        data = await self._receive_response()
-        if data and self._check_packet(data):
+        data = await self._send_and_receive(
+            self._requests['read_cell_volt_temp'], 'state 10'
+        )
+        if data:
             self._parse_packet8(data, self.current_tower)
             # Check if we have more than 128 cells
             if self.hvs_num_cells > 128:
@@ -729,20 +855,15 @@ class BYDHVS:
                     self._state = 5
                 else:
                     self._state = 0  # Polling completed
-        else:
-            _LOGGER.error("Invalid or no data received in state 10")
-            self._state = 0
 
     async def _state11_send_request9(self) -> None:
         """Handle additional cells for more than 128 cells (e.g., 5 modules)"""
         # State 11: Send request 9 - Switch to second pass
-        await self._send_request(self._requests['switch_pass'])
-        data = await self._receive_response()
-        if data and self._check_packet(data):
+        data = await self._send_and_receive(
+            self._requests['switch_pass'], 'state 11'
+        )
+        if data:
             self._state = 12
-        else:
-            _LOGGER.error("Invalid or no data received in state 11")
-            self._state = 0
 
     async def _state12_send_request10(self) -> None:
         """State 12: Send request 10 - Start measurement"""
@@ -763,46 +884,40 @@ class BYDHVS:
 
     async def _state13_send_request11(self) -> None:
         """State 13: Send request 11"""
-        await self._send_request(self._requests['read_measurement_status'])
-        data = await self._receive_response()
-        if data and self._check_packet(data):
+        data = await self._send_and_receive(
+            self._requests['read_measurement_status'], 'state 13'
+        )
+        if data:
             self._state = 14
-        else:
-            _LOGGER.error("Invalid or no data received in state 13")
-            self._state = 0
 
     async def _state14_send_request12(self) -> None:
         """State 14: Send request 12 and parse with parse_packet12"""
-        await self._send_request(
-            self._requests['read_cell_volt_temp']
-            )
-        data = await self._receive_response()
-        if data and self._check_packet(data):
+        data = await self._send_and_receive(
+            self._requests['read_cell_volt_temp'], 'state 14'
+        )
+        if data:
             self._parse_packet12(data, self.current_tower)
             self._state = 15
-        else:
-            _LOGGER.error("Invalid or no data received in state 14")
-            self._state = 0
 
     async def _state15_send_request13(self) -> None:
         """State 15: Send request 13 and parse with parse_packet13"""
-        await self._send_request(
-            self._requests['read_cell_volt_temp']
-            )
-        data = await self._receive_response()
-        if data and self._check_packet(data):
+        data = await self._send_and_receive(
+            self._requests['read_cell_volt_temp'], 'state 15'
+        )
+        if data:
             self._parse_packet13(data, self.current_tower)
             if self.current_tower + 1 < self.hvs_towers:
                 self.current_tower += 1
                 self._state = 5
             else:
                 self._state = 0  # Letzter Turm erreicht
-        else:
-            _LOGGER.error("Invalid or no data received in state 15")
-            self._state = 0
 
-    def get_data(self) -> dict:
-        """Retrieve the collected data."""
+    def get_data(self) -> Dict[str, any]:
+        """Retrieve the collected data.
+
+        Returns:
+            Dictionary containing all collected battery data
+        """
         return {
             "serial_number": self.hvs_serial,
             "bmu_firmware": self.hvs_bmu,
