@@ -7,7 +7,7 @@ async def main():
     """Main func"""
     # Replace with IP address of your BYD HVS battery system
     battery_ip = '192.168.16.254'
-    battery_port = '8080'
+    battery_port = 8080
 
     battery = BYDHVS(ip_address=battery_ip, port=battery_port)
 
