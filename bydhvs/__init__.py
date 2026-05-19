@@ -698,6 +698,8 @@ class BYDHVS:
             or len(request) < self.MIN_MODBUS_REQUEST_LENGTH
         ):
             return False
+        if request[0] != self.MODBUS_ADDRESS:
+            return False
         if data[0] != self.MODBUS_ADDRESS:
             return False
         if data[1] != (request[1] | self.MODBUS_EXCEPTION_FLAG):
