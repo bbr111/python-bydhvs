@@ -657,9 +657,40 @@ class BYDHVS:
         data = await self._receive_response()
         if data and self._check_packet(data):
             return data
-        _LOGGER.error("Invalid or no data received in %s", state_name)
+
+        if data and self._is_modbus_exception_response(data, request):
+            _LOGGER.warning(
+                "Modbus exception response in %s for tower %d "
+                "(exception=0x%02X, len=%d)",
+                state_name,
+                self.current_tower,
+                data[2],
+                len(data),
+            )
+            self._state = 0
+            return None
+
+        if data:
+            _LOGGER.error(
+                "Invalid CRC or malformed packet in %s for tower %d (len=%d)",
+                state_name,
+                self.current_tower,
+                len(data),
+            )
+        else:
+            _LOGGER.error("Invalid or no data received in %s", state_name)
         self._state = 0
         return None
+
+    def _is_modbus_exception_response(self, data: bytes, request: bytes) -> bool:
+        """Check if response is a valid Modbus exception packet."""
+        if len(data) != self.MIN_PACKET_LENGTH or len(request) < 2:
+            return False
+        if data[0] != self.MODBUS_ADDRESS:
+            return False
+        if data[1] != (request[1] | 0x80):
+            return False
+        return CRC16(data) == 0
 
     async def __aenter__(self) -> 'BYDHVS':
         """Async context manager entry."""
