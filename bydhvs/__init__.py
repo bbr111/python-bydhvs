@@ -122,6 +122,7 @@ class BYDHVS:
     # Packet structure constants
     MIN_PACKET_LENGTH = 5
     MODBUS_EXCEPTION_PACKET_LENGTH = 5
+    # Request needs at least address and function code bytes
     MIN_MODBUS_REQUEST_LENGTH = 2
     PACKET_HEADER_SIZE = 3
     PACKET_CRC_SIZE = 2
@@ -687,7 +688,11 @@ class BYDHVS:
         return None
 
     def _is_modbus_exception_response(self, data: bytes, request: bytes) -> bool:
-        """Check if response is a valid Modbus exception packet."""
+        """Check if response is a valid Modbus exception packet.
+
+        A valid Modbus exception response is 5 bytes:
+        address, function|0x80, exception_code, crc_lo, crc_hi.
+        """
         if (
             len(data) != self.MODBUS_EXCEPTION_PACKET_LENGTH
             or len(request) < self.MIN_MODBUS_REQUEST_LENGTH
