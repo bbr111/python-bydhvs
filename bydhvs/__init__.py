@@ -121,6 +121,7 @@ class BYDHVS:
     BUFFER_SIZE = 1024
     # Packet structure constants
     MIN_PACKET_LENGTH = 5
+    MODBUS_EXCEPTION_PACKET_LENGTH = 5
     PACKET_HEADER_SIZE = 3
     PACKET_CRC_SIZE = 2
     PACKET5_MIN_LENGTH = 133
@@ -659,12 +660,13 @@ class BYDHVS:
             return data
 
         if data and self._is_modbus_exception_response(data, request):
+            exception_code = data[2]
             _LOGGER.warning(
                 "Modbus exception response in %s for tower %d "
                 "(exception=0x%02X, len=%d)",
                 state_name,
                 self.current_tower,
-                data[2],
+                exception_code,
                 len(data),
             )
             self._state = 0
@@ -684,7 +686,10 @@ class BYDHVS:
 
     def _is_modbus_exception_response(self, data: bytes, request: bytes) -> bool:
         """Check if response is a valid Modbus exception packet."""
-        if len(data) != self.MIN_PACKET_LENGTH or len(request) < 2:
+        if (
+            len(data) != self.MODBUS_EXCEPTION_PACKET_LENGTH
+            or len(request) < 2
+        ):
             return False
         if data[0] != self.MODBUS_ADDRESS:
             return False
