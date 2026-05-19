@@ -122,10 +122,12 @@ class BYDHVS:
     # Packet structure constants
     MIN_PACKET_LENGTH = 5
     MODBUS_EXCEPTION_PACKET_LENGTH = 5
+    MIN_MODBUS_REQUEST_LENGTH = 2
     PACKET_HEADER_SIZE = 3
     PACKET_CRC_SIZE = 2
     PACKET5_MIN_LENGTH = 133
     MODBUS_ADDRESS = 1
+    MODBUS_EXCEPTION_FLAG = 0x80
     FUNCTION_CODE_READ = 3
     FUNCTION_CODE_WRITE = 16
 
@@ -688,12 +690,12 @@ class BYDHVS:
         """Check if response is a valid Modbus exception packet."""
         if (
             len(data) != self.MODBUS_EXCEPTION_PACKET_LENGTH
-            or len(request) < 2
+            or len(request) < self.MIN_MODBUS_REQUEST_LENGTH
         ):
             return False
         if data[0] != self.MODBUS_ADDRESS:
             return False
-        if data[1] != (request[1] | 0x80):
+        if data[1] != (request[1] | self.MODBUS_EXCEPTION_FLAG):
             return False
         return CRC16(data) == 0
 
