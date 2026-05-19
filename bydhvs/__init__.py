@@ -121,10 +121,14 @@ class BYDHVS:
     BUFFER_SIZE = 1024
     # Packet structure constants
     MIN_PACKET_LENGTH = 5
+    MODBUS_EXCEPTION_PACKET_LENGTH = 5
+    # Request needs at least address and function code bytes
+    MIN_MODBUS_REQUEST_LENGTH = 2
     PACKET_HEADER_SIZE = 3
     PACKET_CRC_SIZE = 2
     PACKET5_MIN_LENGTH = 133
     MODBUS_ADDRESS = 1
+    MODBUS_EXCEPTION_FLAG = 0x80
     FUNCTION_CODE_READ = 3
     FUNCTION_CODE_WRITE = 16
 
@@ -657,9 +661,50 @@ class BYDHVS:
         data = await self._receive_response()
         if data and self._check_packet(data):
             return data
-        _LOGGER.error("Invalid or no data received in %s", state_name)
+
+        if data and self._is_modbus_exception_response(data, request):
+            exception_code = data[2]
+            _LOGGER.warning(
+                "Modbus exception response in %s for tower %d "
+                "(exception=0x%02X, len=%d)",
+                state_name,
+                self.current_tower,
+                exception_code,
+                len(data),
+            )
+            self._state = 0
+            return None
+
+        if data:
+            _LOGGER.error(
+                "Invalid CRC or malformed packet in %s for tower %d (len=%d)",
+                state_name,
+                self.current_tower,
+                len(data),
+            )
+        else:
+            _LOGGER.error("Invalid or no data received in %s", state_name)
         self._state = 0
         return None
+
+    def _is_modbus_exception_response(self, data: bytes, request: bytes) -> bool:
+        """Check if response is a valid Modbus exception packet.
+
+        A valid Modbus exception response is 5 bytes:
+        address, function|0x80, exception_code, crc_lo, crc_hi.
+        """
+        if (
+            len(data) != self.MODBUS_EXCEPTION_PACKET_LENGTH
+            or len(request) < self.MIN_MODBUS_REQUEST_LENGTH
+        ):
+            return False
+        if request[0] != self.MODBUS_ADDRESS:
+            return False
+        if data[0] != self.MODBUS_ADDRESS:
+            return False
+        if data[1] != (request[1] | self.MODBUS_EXCEPTION_FLAG):
+            return False
+        return CRC16(data) == 0
 
     async def __aenter__(self) -> 'BYDHVS':
         """Async context manager entry."""
