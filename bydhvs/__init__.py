@@ -118,6 +118,7 @@ class BYDHVS:
     # Communication settings
     SLEEP_TIME = 4
     READ_TIMEOUT = 15
+    CONNECT_TIMEOUT = 15
     BUFFER_SIZE = 1024
     # Packet structure constants
     MIN_PACKET_LENGTH = 5
@@ -276,12 +277,13 @@ class BYDHVS:
             BYDHVSConnectionError: If OS-level connection error occurs
         """
         try:
-            self._reader, self._writer = await asyncio.open_connection(
-                self._ip_address, self._port
+            self._reader, self._writer = await asyncio.wait_for(
+                asyncio.open_connection(self._ip_address, self._port),
+                timeout=self.CONNECT_TIMEOUT,
             )
             _LOGGER.debug("Connected to %s:%s", self._ip_address, self._port)
             self._state = 2  # Next state
-        except TimeoutError as e:
+        except (TimeoutError, asyncio.TimeoutError) as e:
             _LOGGER.error(
                 "Timeout connecting to %s:%s - %s",
                 self._ip_address, self._port, e
