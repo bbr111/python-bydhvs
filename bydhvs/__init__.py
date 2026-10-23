@@ -616,10 +616,28 @@ class BYDHVS:
         tower['cell_temperatures'].extend(list(data[5:5 + max_temps]))
 
     def _parse_packet12(self, data: bytes, tower_number: int = 0) -> None:
-        """Parse packet 12 for systems with more than 128 cells."""
+        """Parse packet 12 for systems with more than 128 cells.
+
+        Packet 12 is the second-pass equivalent of packet 5: its cell
+        voltages (bytes 101-132) are cells 129-144 and its balancing flags
+        (bytes 17-32) start at cell 129. Only the bytes covering the cells
+        beyond 128 are appended to the first-pass balancing status, so a
+        5-module HVS (160 cells) yields 40 hex characters (160 bits).
+        """
         tower = self.tower_attributes[tower_number]
-        balancing_data = int.from_bytes(data[17:33], 'big')
-        tower['balancing_count'] = bin(balancing_data).count('1')
+        extra_cells = max(0, min(self.hvs_num_cells - 128, 128))
+        extra_flags = data[17:17 + (extra_cells + 7) // 8]
+        if 'balancing_status' in tower:
+            tower['balancing_status'] += extra_flags.hex()
+            tower['balancing_count'] += bin(
+                int.from_bytes(extra_flags, 'big')
+            ).count('1')
+        else:
+            _LOGGER.debug(
+                "Tower %d: first-pass balancing status missing, not "
+                "appending second-pass flags",
+                tower_number,
+            )
 
         tower['cell_voltages'].extend([
             self._buf2int16_si(data, 101 + i * 2) for i in range(16)
