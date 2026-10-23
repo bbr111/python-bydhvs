@@ -591,7 +591,7 @@ class BYDHVS:
     def _parse_packet6(self, data: bytes, tower_number: int = 0) -> None:
         """Parse packet 6 containing additional cell voltages."""
         tower = self.tower_attributes[tower_number]
-        max_cells = min(self.hvs_num_cells - 16, 64)
+        max_cells = max(0, min(self.hvs_num_cells - 16, 64))
         tower['cell_voltages'].extend([
             self._buf2int16_si(data, 5 + i * 2) for i in range(max_cells)
         ])
@@ -599,18 +599,20 @@ class BYDHVS:
     def _parse_packet7(self, data: bytes, tower_number: int = 0) -> None:
         """Parse packet 7 containing more cell voltages and temperatures."""
         tower = self.tower_attributes[tower_number]
-        max_cells = min(self.hvs_num_cells - 80, 48)
+        max_cells = max(0, min(self.hvs_num_cells - 80, 48))
         tower['cell_voltages'].extend([
             self._buf2int16_si(data, 5 + i * 2) for i in range(max_cells)
         ])
 
-        max_temps = min(self.hvs_num_temps, 30)
+        max_temps = max(0, min(self.hvs_num_temps, 30))
         tower['cell_temperatures'] = list(data[103:103 + max_temps])
 
     def _parse_packet8(self, data: bytes, tower_number: int = 0) -> None:
         """Parse packet 8 containing additional cell temperatures."""
         tower = self.tower_attributes[tower_number]
-        max_temps = min(self.hvs_num_temps - 30, 34)
+        # Clamp to 0: with <= 30 temperatures a negative value would turn
+        # the slice below into data[5:-n] and append garbage bytes.
+        max_temps = max(0, min(self.hvs_num_temps - 30, 34))
         tower['cell_temperatures'].extend(list(data[5:5 + max_temps]))
 
     def _parse_packet12(self, data: bytes, tower_number: int = 0) -> None:
@@ -627,7 +629,7 @@ class BYDHVS:
         """Parse packet 13 for systems with more than 144 cells."""
         tower = self.tower_attributes[tower_number]
         start_cell = 144
-        max_cells = min(self.hvs_num_cells - start_cell, 16)
+        max_cells = max(0, min(self.hvs_num_cells - start_cell, 16))
         tower['cell_voltages'].extend([
             self._buf2int16_si(data, 5 + i * 2) for i in range(max_cells)
         ])
