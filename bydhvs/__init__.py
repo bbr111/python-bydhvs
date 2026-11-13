@@ -10,7 +10,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 import crcmod
 
@@ -135,6 +135,13 @@ class BYDHVS:
     # Home Assistant rejects states longer than 255 characters; the
     # warning/error texts are used as sensor states.
     MAX_TEXT_LENGTH = 255
+    # See self._retry_requests in __init__ for why only these.
+    RETRY_REQUEST_NAMES = (
+        'read_serial_number',
+        'read_status_information',
+        'read_battery_info',
+        'read_measurement_status',
+    )
 
     def __init__(self, ip_address: str, port: int = 8080) -> None:
         """Initialize the BYDHVS communication class.
@@ -270,6 +277,17 @@ class BYDHVS:
             "Interlock switch Abnormal",                    # Bit 14
             "AirSwitch Abnormal"                            # Bit 15
         ]
+
+        # Requests that may be sent a second time when the first answer is
+        # missing or broken. They only read values, and reading them twice
+        # returns the same data. Deliberately NOT included:
+        # - read_cell_volt_temp: every read returns the NEXT cell packet
+        #   (5, 6, 7, 8, ...), so a repeat would silently skip one packet.
+        # - all writes (start_measure_box_*, switch_pass): they are never
+        #   sent more often than in the normal polling sequence.
+        self._retry_requests = {
+            self._requests[name] for name in self.RETRY_REQUEST_NAMES
+        }
 
         # Battery configuration (set during parsing)
         self._battery_config: Optional[BatteryConfig] = None
@@ -734,6 +752,11 @@ class BYDHVS:
     ) -> Optional[bytes]:
         """Send request and receive response with error handling.
 
+        If the answer is missing or invalid, requests from
+        RETRY_REQUEST_NAMES are sent a second time; all other requests
+        are never repeated. On failure the state is set to 0, which ends
+        the poll.
+
         Args:
             request: The request bytes to send
             state_name: Name of the current state for logging
@@ -741,14 +764,33 @@ class BYDHVS:
         Returns:
             Response data if successful, None otherwise
         """
-        if not await self._send_request(request):
-            # Connection broken: waiting for an answer would only time out.
+        data, sent = await self._send_and_receive_once(request, state_name)
+        if data is None and sent and request in self._retry_requests:
+            _LOGGER.warning("Retrying the request of %s once", state_name)
+            data, sent = await self._send_and_receive_once(
+                request, state_name
+            )
+        if data is None:
             self._state = 0
-            return None
+        return data
+
+    async def _send_and_receive_once(
+        self,
+        request: bytes,
+        state_name: str
+    ) -> Tuple[Optional[bytes], bool]:
+        """Send a request once and return (response, sent).
+
+        response is None if the answer is missing or invalid. sent is
+        False if the request could not be sent at all (connection
+        broken), in which case a retry makes no sense.
+        """
+        if not await self._send_request(request):
+            return None, False
         data = await self._receive_response()
         if data and self._check_packet(data):
             if self._matches_request(data, request):
-                return data
+                return data, True
             _LOGGER.error(
                 "Response in %s for tower %d does not match the request "
                 "(request=%s, response length=%d)",
@@ -757,8 +799,7 @@ class BYDHVS:
                 request.hex(),
                 len(data),
             )
-            self._state = 0
-            return None
+            return None, True
 
         if data and self._is_modbus_exception_response(data, request):
             exception_code = data[2]
@@ -770,8 +811,7 @@ class BYDHVS:
                 exception_code,
                 len(data),
             )
-            self._state = 0
-            return None
+            return None, True
 
         if data:
             _LOGGER.error(
@@ -782,8 +822,7 @@ class BYDHVS:
             )
         else:
             _LOGGER.error("Invalid or no data received in %s", state_name)
-        self._state = 0
-        return None
+        return None, True
 
     def _matches_request(self, data: bytes, request: bytes) -> bool:
         """Check that a (valid) response belongs to the request.

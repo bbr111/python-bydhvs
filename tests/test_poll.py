@@ -60,6 +60,44 @@ class TestPollSuccess(PollTestCase):
         self.assertEqual(len(tower["cell_voltages"]), 96)
 
 
+class TestRetry(PollTestCase):
+    """Only reads that return the same data twice are repeated."""
+
+    async def test_lost_status_answer_is_retried(self):
+        self.fake.add_fault("read_status_information", "drop")
+        await self.battery.poll()
+        expected = list(EXPECTED_SEQUENCE)
+        expected.insert(2, "read_status_information")  # sent twice
+        self.assertEqual(self.fake.received, expected)
+        self.assertEqual(self.battery.get_data()["soc"], 87)
+
+    async def test_broken_crc_is_retried(self):
+        self.fake.add_fault("read_serial_number", "corrupt")
+        await self.battery.poll()
+        self.assertEqual(self.fake.received[:2], ["read_serial_number"] * 2)
+        self.assertEqual(self.battery.get_data()["serial_number"], SERIAL)
+
+    async def test_retry_only_once(self):
+        for _ in range(2):
+            self.fake.add_fault("read_battery_info", "drop")
+        await self.battery.poll()
+        self.assertEqual(
+            self.fake.received,
+            EXPECTED_SEQUENCE[:2] + ["read_battery_info"] * 2,
+        )
+
+    async def test_cell_data_read_is_not_retried(self):
+        """A repeated cell read would return the next packet."""
+        self.fake.add_fault("read_cell_volt_temp", "drop")
+        await self.battery.poll()
+        self.assertEqual(self.fake.received, EXPECTED_SEQUENCE[:6])
+
+    async def test_write_is_not_retried(self):
+        self.fake.add_fault("start_measure_box_1", "drop")
+        await self.battery.poll()
+        self.assertEqual(self.fake.received, EXPECTED_SEQUENCE[:4])
+
+
 class TestStartMeasureRequest(unittest.TestCase):
     """The 'start measurement' write exists for towers 1-3 only."""
 
