@@ -132,6 +132,9 @@ class BYDHVS:
     MODBUS_EXCEPTION_FLAG = 0x80
     FUNCTION_CODE_READ = 3
     FUNCTION_CODE_WRITE = 16
+    # Home Assistant rejects states longer than 255 characters; the
+    # warning/error texts are used as sensor states.
+    MAX_TEXT_LENGTH = 255
 
     def __init__(self, ip_address: str, port: int = 8080) -> None:
         """Initialize the BYDHVS communication class.
@@ -383,6 +386,21 @@ class BYDHVS:
         crc = CRC16(data)
         return crc == 0
 
+    @classmethod
+    def _flags_to_text(cls, flags: int, names: List[str]) -> str:
+        """Return the names of all set bits, joined with "; ".
+
+        Bit 0 maps to names[0], bit 1 to names[1], and so on. Returns
+        "No Error" if no bit is set. The text is cut to MAX_TEXT_LENGTH
+        characters (ending with "...") so it always fits a sensor state.
+        """
+        text = "; ".join(
+            name for bit, name in enumerate(names) if flags & (1 << bit)
+        ) or "No Error"
+        if len(text) > cls.MAX_TEXT_LENGTH:
+            text = text[:cls.MAX_TEXT_LENGTH - 3] + "..."
+        return text
+
     @staticmethod
     def _buf2int16_si(data: bytes, pos: int) -> int:
         """Convert buffer to signed 16-bit integer."""
@@ -451,13 +469,9 @@ class BYDHVS:
         self.hvs_diff_volt = round(self.hvs_max_volt - self.hvs_min_volt, 2)
 
         # Construct error string based on error codes
-        self.hvs_error_string = "; ".join(
-            [
-                err
-                for i, err in enumerate(self._errors)
-                if self.hvs_error & (1 << i)
-            ]
-        ) or "No Error"
+        self.hvs_error_string = self._flags_to_text(
+            self.hvs_error, self._errors
+        )
 
         self.hvs_charge_total = self._buf2int32_us(data, 37) / 10
         self.hvs_discharge_total = self._buf2int32_us(data, 41) / 10
@@ -585,13 +599,9 @@ class BYDHVS:
         state_code = int.from_bytes(data[59:61], byteorder='big')
         tower['state_code'] = state_code
         tower['state'] = f"{state_code:04X}"  # e.g. "0100" for bit 8
-        tower['state_string'] = "; ".join(
-            [
-                err
-                for i, err in enumerate(self._stat_tower)
-                if state_code & (1 << i)
-            ]
-        ) or "No Error"
+        tower['state_string'] = self._flags_to_text(
+            state_code, self._stat_tower
+        )
 
         # Cell voltages (Bytes 101 to 132) for cells 1 to 16
         tower['cell_voltages'] = [
