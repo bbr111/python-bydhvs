@@ -1,3 +1,6 @@
 
 /bydhvs/__pycache__
 /.vscode
+
+/tests/__pycache__
+.pytest_cache/
