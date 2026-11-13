@@ -576,14 +576,20 @@ class BYDHVS:
             )
         tower['soh'] = round(self._buf2int16_si(data, 55), 1)
         tower['current'] = round(self._buf2int16_si(data, 57) / 10.0, 1)
-        tower['state'] = f"{data[59]}{data[60]}"
-        # tower['state_string'] = self.stat_tower[tower['state']]
-
+        # Bytes 59-60 hold the tower warning flags as one 16-bit register
+        # (big-endian, like every Modbus register): bit 0 is the lowest bit
+        # of byte 60, bit 8 the lowest bit of byte 59. Bit names see
+        # self._stat_tower. Earlier versions concatenated the two bytes as
+        # decimal text (e.g. 1 and 0 -> "10"), which decoded every flag in
+        # byte 59 wrongly.
+        state_code = int.from_bytes(data[59:61], byteorder='big')
+        tower['state_code'] = state_code
+        tower['state'] = f"{state_code:04X}"  # e.g. "0100" for bit 8
         tower['state_string'] = "; ".join(
             [
                 err
                 for i, err in enumerate(self._stat_tower)
-                if int(tower['state']) & (1 << i)
+                if state_code & (1 << i)
             ]
         ) or "No Error"
 
