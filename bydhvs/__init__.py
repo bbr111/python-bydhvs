@@ -917,7 +917,8 @@ class BYDHVS:
             BYDHVSTimeoutError: If connecting or an answer times out
             BYDHVSProtocolError: If the battery sends an invalid answer
                 (subclass of BYDHVSConnectionError)
-            BYDHVSError: For other battery communication errors
+            BYDHVSError: For other battery communication errors, or if
+                poll() is called while a poll is still running
 
         Note:
             Call get_data() after a successful poll() to retrieve the data.
@@ -927,8 +928,9 @@ class BYDHVS:
             (Up to 0.4.14, poll() returned normally even if a step failed.)
         """
         if self._state != 0:
-            _LOGGER.warning("Already polling")
-            return
+            # The battery handles one request sequence at a time; a second
+            # poll() on the same object would mix up both sequences.
+            raise BYDHVSError("poll() is already running")
         self._state = 1
         self.current_tower = 0
         self.state_action_list = []

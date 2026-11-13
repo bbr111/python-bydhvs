@@ -2,9 +2,12 @@
 
 import unittest
 
+import asyncio
+
 from bydhvs import (
     BYDHVS,
     BYDHVSConnectionError,
+    BYDHVSError,
     BYDHVSProtocolError,
     BYDHVSTimeoutError,
 )
@@ -144,6 +147,14 @@ class TestPollErrors(PollTestCase):
         await self.battery.poll()
         tower = self.battery.get_data()["tower_attributes"][0]
         self.assertEqual(len(tower["cell_voltages"]), 96)
+
+    async def test_concurrent_poll_is_rejected(self):
+        first = asyncio.create_task(self.battery.poll())
+        await asyncio.sleep(0)  # let the first poll start
+        with self.assertRaises(BYDHVSError):
+            await self.battery.poll()
+        await first  # the first poll is not disturbed
+        self.assertEqual(self.fake.received, EXPECTED_SEQUENCE)
 
 
 class TestStartMeasureRequest(unittest.TestCase):
