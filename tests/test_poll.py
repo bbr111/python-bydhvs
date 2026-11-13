@@ -2,7 +2,12 @@
 
 import unittest
 
-from bydhvs import BYDHVS
+from bydhvs import (
+    BYDHVS,
+    BYDHVSConnectionError,
+    BYDHVSProtocolError,
+    BYDHVSTimeoutError,
+)
 
 from fake_battery import EXPECTED_SEQUENCE, SERIAL, FakeBattery
 
@@ -80,7 +85,8 @@ class TestRetry(PollTestCase):
     async def test_retry_only_once(self):
         for _ in range(2):
             self.fake.add_fault("read_battery_info", "drop")
-        await self.battery.poll()
+        with self.assertRaises(BYDHVSTimeoutError):
+            await self.battery.poll()
         self.assertEqual(
             self.fake.received,
             EXPECTED_SEQUENCE[:2] + ["read_battery_info"] * 2,
@@ -89,13 +95,55 @@ class TestRetry(PollTestCase):
     async def test_cell_data_read_is_not_retried(self):
         """A repeated cell read would return the next packet."""
         self.fake.add_fault("read_cell_volt_temp", "drop")
-        await self.battery.poll()
+        with self.assertRaises(BYDHVSTimeoutError):
+            await self.battery.poll()
         self.assertEqual(self.fake.received, EXPECTED_SEQUENCE[:6])
 
     async def test_write_is_not_retried(self):
         self.fake.add_fault("start_measure_box_1", "drop")
-        await self.battery.poll()
+        with self.assertRaises(BYDHVSTimeoutError):
+            await self.battery.poll()
         self.assertEqual(self.fake.received, EXPECTED_SEQUENCE[:4])
+
+
+class TestPollErrors(PollTestCase):
+    """poll() must raise if it could not read all data."""
+
+    async def test_timeout(self):
+        self.fake.add_fault("read_cell_volt_temp", "drop")
+        with self.assertRaises(BYDHVSTimeoutError) as ctx:
+            await self.battery.poll()
+        self.assertIn("state 7", str(ctx.exception))
+
+    async def test_broken_cell_packet(self):
+        self.fake.add_fault("read_cell_volt_temp", "corrupt")
+        with self.assertRaises(BYDHVSProtocolError):
+            await self.battery.poll()
+
+    async def test_modbus_exception(self):
+        self.fake.add_fault("start_measure_box_1", "exception")
+        with self.assertRaises(BYDHVSProtocolError):
+            await self.battery.poll()
+
+    async def test_protocol_error_is_connection_error(self):
+        """Existing 'except BYDHVSConnectionError' code still catches it."""
+        self.fake.add_fault("read_cell_volt_temp", "corrupt")
+        with self.assertRaises(BYDHVSConnectionError):
+            await self.battery.poll()
+
+    async def test_connection_refused(self):
+        await self.fake.stop()
+        with self.assertRaises(BYDHVSConnectionError):
+            await self.battery.poll()
+        await self.fake.start()  # for asyncTearDown
+
+    async def test_next_poll_works_after_error(self):
+        self.fake.add_fault("read_cell_volt_temp", "drop")
+        with self.assertRaises(BYDHVSTimeoutError):
+            await self.battery.poll()
+        await self.battery.poll()
+        tower = self.battery.get_data()["tower_attributes"][0]
+        self.assertEqual(len(tower["cell_voltages"]), 96)
 
 
 class TestStartMeasureRequest(unittest.TestCase):

@@ -55,6 +55,15 @@ class BYDHVSTimeoutError(BYDHVSError):
     """Exception raised when a timeout occurs during communication."""
 
 
+class BYDHVSProtocolError(BYDHVSConnectionError):
+    """The battery answered, but not with the expected data.
+
+    Raised e.g. for a broken CRC, a Modbus exception or an answer that
+    does not match the request. It is a subclass of BYDHVSConnectionError,
+    so code that already catches BYDHVSConnectionError handles it too.
+    """
+
+
 CRC16 = crcmod.predefined.mkCrcFun('modbus')
 
 
@@ -163,6 +172,11 @@ class BYDHVS:
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._state = 0
+        # Set by poll(): True only if the whole polling sequence finished,
+        # otherwise _poll_error tells what went wrong.
+        self._poll_complete = False
+        self._poll_error: Optional[BYDHVSError] = None
+        self._last_read_timed_out = False
 
         # Initialize battery parameters
         self.hvs_soc = 0
@@ -408,6 +422,7 @@ class BYDHVS:
         # (on 3.11+ it is the same as TimeoutError).
         except (TimeoutError, asyncio.TimeoutError):
             _LOGGER.error("Socket timeout")
+            self._last_read_timed_out = True
             return None
         except asyncio.IncompleteReadError as e:
             _LOGGER.error(
@@ -771,8 +786,27 @@ class BYDHVS:
                 request, state_name
             )
         if data is None:
+            self._poll_error = self._communication_error(state_name, sent)
             self._state = 0
         return data
+
+    def _communication_error(
+        self, state_name: str, sent: bool
+    ) -> BYDHVSError:
+        """Return the exception poll() raises after a failed request."""
+        where = f"{state_name} (tower {self.current_tower + 1})"
+        if not sent:
+            return BYDHVSConnectionError(
+                f"Connection lost in {where}"
+            )
+        if self._last_read_timed_out:
+            return BYDHVSTimeoutError(f"No answer from the battery in {where}")
+        return BYDHVSProtocolError(f"Invalid answer from the battery in {where}")
+
+    def _finish_poll(self) -> None:
+        """End the state machine after the last step of a full poll."""
+        self._poll_complete = True
+        self._state = 0
 
     async def _send_and_receive_once(
         self,
@@ -787,6 +821,7 @@ class BYDHVS:
         """
         if not await self._send_request(request):
             return None, False
+        self._last_read_timed_out = False
         data = await self._receive_response()
         if data and self._check_packet(data):
             if self._matches_request(data, request):
@@ -878,12 +913,18 @@ class BYDHVS:
         4. Read detailed cell voltages and temperatures for all towers
 
         Raises:
-            BYDHVSConnectionError: If connection fails
-            BYDHVSTimeoutError: If communication times out
+            BYDHVSConnectionError: If the connection fails or breaks
+            BYDHVSTimeoutError: If connecting or an answer times out
+            BYDHVSProtocolError: If the battery sends an invalid answer
+                (subclass of BYDHVSConnectionError)
             BYDHVSError: For other battery communication errors
 
         Note:
-            Call get_data() after successful poll() to retrieve collected data
+            Call get_data() after a successful poll() to retrieve the data.
+            poll() only returns normally if ALL steps succeeded. After an
+            exception, get_data() can contain a mix of values from this
+            and the previous poll and should not be used.
+            (Up to 0.4.14, poll() returned normally even if a step failed.)
         """
         if self._state != 0:
             _LOGGER.warning("Already polling")
@@ -891,6 +932,8 @@ class BYDHVS:
         self._state = 1
         self.current_tower = 0
         self.state_action_list = []
+        self._poll_complete = False
+        self._poll_error = None
 
         try:
             await self._connect()
@@ -920,7 +963,17 @@ class BYDHVS:
                     await action()
                 else:
                     _LOGGER.error("Unknown state: %s", self._state)
+                    self._poll_error = BYDHVSError(
+                        f"Unknown polling state {self._state}"
+                    )
                     self._state = 0
+
+            if not self._poll_complete:
+                # A step failed and stopped the state machine. Report it
+                # instead of returning as if the poll had succeeded.
+                raise self._poll_error or BYDHVSError(
+                    "Polling stopped before all data was read"
+                )
 
         except Exception as e:
             _LOGGER.error("Error during polling: %s", e, exc_info=True)
@@ -968,7 +1021,8 @@ class BYDHVS:
             if self.hvs_num_cells > 0 and self.hvs_num_temps > 0:
                 self._state = 5
             else:
-                self._state = 0  # End polling if no detailed data available
+                # No cell data for this battery type: nothing more to read.
+                self._finish_poll()
 
     def _start_measure_request(self) -> Optional[bytes]:
         """Return the 'start measurement' request for the current tower.
@@ -994,6 +1048,9 @@ class BYDHVS:
         """State 5: Start measurement and proceed with detailed queries."""
         request = self._start_measure_request()
         if request is None:
+            self._poll_error = BYDHVSError(
+                f"Cell data of tower {self.current_tower + 1} not supported"
+            )
             self._state = 0
             return
         data = await self._send_and_receive(request, 'state 5')
@@ -1067,7 +1124,7 @@ class BYDHVS:
                     self.current_tower += 1
                     self._state = 5
                 else:
-                    self._state = 0  # Polling completed
+                    self._finish_poll()  # last tower done
 
     async def _state11_send_request9(self) -> None:
         """Handle additional cells for more than 128 cells (e.g., 5 modules)"""
@@ -1082,6 +1139,9 @@ class BYDHVS:
         """State 12: Send request 10 - Start measurement"""
         request = self._start_measure_request()
         if request is None:
+            self._poll_error = BYDHVSError(
+                f"Cell data of tower {self.current_tower + 1} not supported"
+            )
             self._state = 0
             return
         data = await self._send_and_receive(request, 'state 12')
@@ -1118,7 +1178,7 @@ class BYDHVS:
                 self.current_tower += 1
                 self._state = 5
             else:
-                self._state = 0  # Letzter Turm erreicht
+                self._finish_poll()  # last tower done
 
     def get_data(self) -> Dict[str, any]:
         """Retrieve the collected data.
