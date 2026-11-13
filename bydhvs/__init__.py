@@ -119,7 +119,7 @@ class BYDHVS:
     SLEEP_TIME = 4
     READ_TIMEOUT = 15
     CONNECT_TIMEOUT = 15
-    BUFFER_SIZE = 1024
+    BUFFER_SIZE = 1024  # unused since responses are read frame by frame
     # Packet structure constants
     MIN_PACKET_LENGTH = 5
     MODBUS_EXCEPTION_PACKET_LENGTH = 5
@@ -329,32 +329,79 @@ class BYDHVS:
         _LOGGER.debug("Sent: %s", request.hex())
         return True
 
+    def _remaining_frame_length(self, header: bytes) -> Optional[int]:
+        """Return how many bytes follow the 3 header bytes of a frame.
+
+        The battery answers in Modbus RTU format. The first 3 bytes tell
+        how long the whole frame is:
+
+            read (function 3):   addr, 3, byte_count,
+                                 <byte_count data bytes>, crc_lo, crc_hi
+            write (function 16): addr, 16, reg_hi, reg_lo, count_hi,
+                                 count_lo, crc_lo, crc_hi   (8 bytes)
+            exception:           addr, function | 0x80, code,
+                                 crc_lo, crc_hi             (5 bytes)
+
+        Returns None for an unknown function code.
+        """
+        function_code = header[1]
+        if function_code == self.FUNCTION_CODE_READ:
+            return header[2] + self.PACKET_CRC_SIZE
+        if function_code == self.FUNCTION_CODE_WRITE:
+            return 8 - self.PACKET_HEADER_SIZE
+        if function_code & self.MODBUS_EXCEPTION_FLAG:
+            return self.MODBUS_EXCEPTION_PACKET_LENGTH - self.PACKET_HEADER_SIZE
+        return None
+
+    async def _read_frame(self) -> bytes:
+        """Read exactly one response frame from the connection.
+
+        TCP does not keep message boundaries, so a frame can arrive in
+        several pieces (or together with the next one). Reading the
+        header first and then exactly the announced number of bytes
+        always returns one complete frame.
+
+        Raises:
+            asyncio.IncompleteReadError: If the connection closes early
+        """
+        header = await self._reader.readexactly(self.PACKET_HEADER_SIZE)
+        remaining = self._remaining_frame_length(header)
+        if remaining is None:
+            # Unknown frame layout: return the header only, the packet
+            # check rejects it.
+            return header
+        return header + await self._reader.readexactly(remaining)
+
     async def _receive_response(self) -> Optional[bytes]:
-        """Receive a response from the battery.
+        """Receive one complete response frame from the battery.
 
         Returns:
             Response bytes if successful, None on timeout or error.
             The caller decides how to continue (see _send_and_receive).
         """
-        if self._reader:
-            try:
-                data = await asyncio.wait_for(
-                    self._reader.read(self.BUFFER_SIZE),
-                    timeout=self.READ_TIMEOUT
-                    )
-                _LOGGER.debug("Received: %s", data.hex())
-                return data
-            # asyncio.TimeoutError is a separate class before Python 3.11
-            # (on 3.11+ it is the same as TimeoutError).
-            except (TimeoutError, asyncio.TimeoutError):
-                _LOGGER.error("Socket timeout")
-            except asyncio.IncompleteReadError as e:
-                _LOGGER.error("Incomplete read error: %s", e)
-            except (ConnectionResetError, OSError) as e:
-                _LOGGER.error("Error receiving data: %s", e)
-        else:
+        if not self._reader:
             _LOGGER.error("No connection available")
-        return None
+            return None
+        try:
+            data = await asyncio.wait_for(
+                self._read_frame(), timeout=self.READ_TIMEOUT
+            )
+        # asyncio.TimeoutError is a separate class before Python 3.11
+        # (on 3.11+ it is the same as TimeoutError).
+        except (TimeoutError, asyncio.TimeoutError):
+            _LOGGER.error("Socket timeout")
+            return None
+        except asyncio.IncompleteReadError as e:
+            _LOGGER.error(
+                "Connection closed after %d bytes of a response",
+                len(e.partial),
+            )
+            return None
+        except (ConnectionResetError, OSError) as e:
+            _LOGGER.error("Error receiving data: %s", e)
+            return None
+        _LOGGER.debug("Received: %s", data.hex())
+        return data
 
     def _check_packet(self, data: bytes) -> bool:
         """Check if the received packet is valid.

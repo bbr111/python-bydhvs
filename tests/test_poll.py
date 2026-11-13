@@ -50,6 +50,15 @@ class TestPollSuccess(PollTestCase):
         self.assertEqual(tower["balancing_count"], 2)
         self.assertEqual(tower["state_string"], "Cells Imbalance")
 
+    async def test_split_answers(self):
+        """Answers arriving in 20-byte chunks are still read correctly."""
+        for name in ("read_serial_number", "read_cell_volt_temp"):
+            self.fake.add_fault(name, "split")
+        await self.battery.poll()
+        self.assertEqual(self.fake.received, EXPECTED_SEQUENCE)
+        tower = self.battery.get_data()["tower_attributes"][0]
+        self.assertEqual(len(tower["cell_voltages"]), 96)
+
 
 class TestStartMeasureRequest(unittest.TestCase):
     """The 'start measurement' write exists for towers 1-3 only."""
