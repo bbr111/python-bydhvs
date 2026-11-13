@@ -747,7 +747,18 @@ class BYDHVS:
             return None
         data = await self._receive_response()
         if data and self._check_packet(data):
-            return data
+            if self._matches_request(data, request):
+                return data
+            _LOGGER.error(
+                "Response in %s for tower %d does not match the request "
+                "(request=%s, response length=%d)",
+                state_name,
+                self.current_tower,
+                request.hex(),
+                len(data),
+            )
+            self._state = 0
+            return None
 
         if data and self._is_modbus_exception_response(data, request):
             exception_code = data[2]
@@ -773,6 +784,22 @@ class BYDHVS:
             _LOGGER.error("Invalid or no data received in %s", state_name)
         self._state = 0
         return None
+
+    def _matches_request(self, data: bytes, request: bytes) -> bool:
+        """Check that a (valid) response belongs to the request.
+
+        The response must have the same function code. For a read
+        (function 3), the request asks for a number of 16-bit registers
+        (request bytes 4-5), so the response must carry exactly twice as
+        many data bytes (response byte 2). This catches a late answer to
+        an earlier request being taken for the answer to this one.
+        """
+        if data[1] != request[1]:
+            return False
+        if request[1] == self.FUNCTION_CODE_READ:
+            register_count = int.from_bytes(request[4:6], byteorder='big')
+            return data[2] == 2 * register_count
+        return True
 
     def _is_modbus_exception_response(self, data: bytes, request: bytes) -> bool:
         """Check if response is a valid Modbus exception packet.
