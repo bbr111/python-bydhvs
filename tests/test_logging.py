@@ -2,16 +2,18 @@
 
 import logging
 
-from bydhvs import BYDHVSTimeoutError
-
 from test_poll import PollTestCase
+
+from bydhvs import BYDHVSTimeoutError
 
 
 class TestPollLogging(PollTestCase):
 
     async def test_no_traceback_for_timeout(self):
         self.fake.add_fault("read_cell_volt_temp", "drop")
-        with self.assertLogs("bydhvs", level=logging.DEBUG) as logs:
+        # Nested on purpose: parenthesized multi-context "with" needs
+        # Python 3.10+, the package still allows 3.9.
+        with self.assertLogs("bydhvs", level=logging.DEBUG) as logs:  # noqa: SIM117
             with self.assertRaises(BYDHVSTimeoutError):
                 await self.battery.poll()
         self.assertFalse(any(r.exc_info for r in logs.records))

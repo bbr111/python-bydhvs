@@ -2,9 +2,9 @@
 
 import unittest
 
-from bydhvs import BYDHVS
-
 from frames import read_response
+
+from bydhvs import BYDHVS
 
 # Packet 5 is a read response with 130 data bytes (0x41 registers).
 PACKET5_DATA_LEN = 130

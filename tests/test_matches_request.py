@@ -2,9 +2,9 @@
 
 import unittest
 
-from bydhvs import BYDHVS
-
 from frames import read_response, write_response
+
+from bydhvs import BYDHVS
 
 
 class TestMatchesRequest(unittest.TestCase):

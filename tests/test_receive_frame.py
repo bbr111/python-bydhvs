@@ -3,9 +3,9 @@
 import asyncio
 import unittest
 
-from bydhvs import BYDHVS
-
 from frames import exception_response, read_response, write_response
+
+from bydhvs import BYDHVS
 
 
 def _reader_with(*chunks: bytes, eof: bool = True) -> asyncio.StreamReader:

@@ -1,8 +1,9 @@
 """End-to-end poll() tests against the simulated battery."""
 
+import asyncio
 import unittest
 
-import asyncio
+from fake_battery import EXPECTED_SEQUENCE, SERIAL, FakeBattery
 
 from bydhvs import (
     BYDHVS,
@@ -11,8 +12,6 @@ from bydhvs import (
     BYDHVSProtocolError,
     BYDHVSTimeoutError,
 )
-
-from fake_battery import EXPECTED_SEQUENCE, SERIAL, FakeBattery
 
 
 class PollTestCase(unittest.IsolatedAsyncioTestCase):

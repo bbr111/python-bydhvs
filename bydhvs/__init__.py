@@ -385,7 +385,7 @@ class BYDHVS:
             return self.MODBUS_EXCEPTION_PACKET_LENGTH - self.PACKET_HEADER_SIZE
         return None
 
-    async def _read_frame(self) -> bytes:
+    async def _read_frame(self, reader: asyncio.StreamReader) -> bytes:
         """Read exactly one response frame from the connection.
 
         TCP does not keep message boundaries, so a frame can arrive in
@@ -396,13 +396,13 @@ class BYDHVS:
         Raises:
             asyncio.IncompleteReadError: If the connection closes early
         """
-        header = await self._reader.readexactly(self.PACKET_HEADER_SIZE)
+        header = await reader.readexactly(self.PACKET_HEADER_SIZE)
         remaining = self._remaining_frame_length(header)
         if remaining is None:
             # Unknown frame layout: return the header only, the packet
             # check rejects it.
             return header
-        return header + await self._reader.readexactly(remaining)
+        return header + await reader.readexactly(remaining)
 
     async def _receive_response(self) -> Optional[bytes]:
         """Receive one complete response frame from the battery.
@@ -416,7 +416,7 @@ class BYDHVS:
             return None
         try:
             data = await asyncio.wait_for(
-                self._read_frame(), timeout=self.READ_TIMEOUT
+                self._read_frame(self._reader), timeout=self.READ_TIMEOUT
             )
         # asyncio.TimeoutError is a separate class before Python 3.11
         # (on 3.11+ it is the same as TimeoutError).
