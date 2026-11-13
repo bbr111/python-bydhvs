@@ -344,7 +344,9 @@ class BYDHVS:
                     )
                 _LOGGER.debug("Received: %s", data.hex())
                 return data
-            except TimeoutError:
+            # asyncio.TimeoutError is a separate class before Python 3.11
+            # (on 3.11+ it is the same as TimeoutError).
+            except (TimeoutError, asyncio.TimeoutError):
                 _LOGGER.error("Socket timeout")
                 self._state = 0
             except asyncio.IncompleteReadError as e:
