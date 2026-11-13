@@ -977,7 +977,13 @@ class BYDHVS:
                     "Polling stopped before all data was read"
                 )
 
+        except BYDHVSError:
+            # Expected communication problem: the details were already
+            # logged where it happened, and the caller gets the exception.
+            # No traceback, it would only repeat the message.
+            raise
         except Exception as e:
+            # Anything else is a bug: log it with the traceback.
             _LOGGER.error("Error during polling: %s", e, exc_info=True)
             raise
         finally:
