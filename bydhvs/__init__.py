@@ -307,34 +307,34 @@ class BYDHVS:
                 f"OS error connecting to {self._ip_address}:{self._port}"
             ) from e
 
-    async def _send_request(self, request: bytes) -> None:
+    async def _send_request(self, request: bytes) -> bool:
         """Send a request to the battery.
 
         Args:
             request: Raw bytes to send over TCP connection
 
-        Note:
-            Sets state to 0 on connection errors
+        Returns:
+            True if the request was sent, False on connection errors.
+            The caller decides how to continue (see _send_and_receive).
         """
-        if self._writer:
-            try:
-                self._writer.write(request)
-                await self._writer.drain()
-                _LOGGER.debug("Sent: %s", request.hex())
-            except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                _LOGGER.error("Error sending data: %s", e)
-                self._state = 0
-        else:
+        if not self._writer:
             _LOGGER.error("No connection available")
+            return False
+        try:
+            self._writer.write(request)
+            await self._writer.drain()
+        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            _LOGGER.error("Error sending data: %s", e)
+            return False
+        _LOGGER.debug("Sent: %s", request.hex())
+        return True
 
     async def _receive_response(self) -> Optional[bytes]:
         """Receive a response from the battery.
 
         Returns:
-            Response bytes if successful, None on timeout or error
-
-        Note:
-            Sets state to 0 on errors and returns None
+            Response bytes if successful, None on timeout or error.
+            The caller decides how to continue (see _send_and_receive).
         """
         if self._reader:
             try:
@@ -348,13 +348,10 @@ class BYDHVS:
             # (on 3.11+ it is the same as TimeoutError).
             except (TimeoutError, asyncio.TimeoutError):
                 _LOGGER.error("Socket timeout")
-                self._state = 0
             except asyncio.IncompleteReadError as e:
                 _LOGGER.error("Incomplete read error: %s", e)
-                self._state = 0
             except (ConnectionResetError, OSError) as e:
                 _LOGGER.error("Error receiving data: %s", e)
-                self._state = 0
         else:
             _LOGGER.error("No connection available")
         return None
@@ -697,7 +694,10 @@ class BYDHVS:
         Returns:
             Response data if successful, None otherwise
         """
-        await self._send_request(request)
+        if not await self._send_request(request):
+            # Connection broken: waiting for an answer would only time out.
+            self._state = 0
+            return None
         data = await self._receive_response()
         if data and self._check_packet(data):
             return data
@@ -857,22 +857,37 @@ class BYDHVS:
             else:
                 self._state = 0  # End polling if no detailed data available
 
+    def _start_measure_request(self) -> Optional[bytes]:
+        """Return the 'start measurement' request for the current tower.
+
+        This request is a write (function 16) that tells the BMS of tower
+        1, 2 or 3 to collect its cell data. Requests exist for 3 towers
+        only; for more towers None is returned and polling stops.
+        """
+        requests = {
+            0: self._requests['start_measure_box_1'],
+            1: self._requests['start_measure_box_2'],
+            2: self._requests['start_measure_box_3'],
+        }
+        request = requests.get(self.current_tower)
+        if request is None:
+            _LOGGER.error(
+                "Cell data of tower %d is not supported (max. 3 towers)",
+                self.current_tower + 1,
+            )
+        return request
+
     async def _state5_start_measurement(self) -> None:
         """State 5: Start measurement and proceed with detailed queries."""
-        if self.current_tower == 0:
-            await self._send_request(self._requests['start_measure_box_1'])
-        elif self.current_tower == 1:
-            await self._send_request(self._requests['start_measure_box_2'])
-        elif self.current_tower == 2:
-            await self._send_request(self._requests['start_measure_box_3'])
-        data = await self._receive_response()
-        if data and self._check_packet(data):
-            # Wait time as per original code (e.g., 8 seconds)
+        request = self._start_measure_request()
+        if request is None:
+            self._state = 0
+            return
+        data = await self._send_and_receive(request, 'state 5')
+        if data:
+            # Give the BMS time to collect the cell data.
             await asyncio.sleep(self.SLEEP_TIME)
             self._state = 6
-        else:
-            _LOGGER.error("Invalid or no data received in state 5")
-            self._state = 0
 
     async def _state6_send_request4(self) -> None:
         """State 6: Send request 4"""
@@ -952,20 +967,15 @@ class BYDHVS:
 
     async def _state12_send_request10(self) -> None:
         """State 12: Send request 10 - Start measurement"""
-        if self.current_tower == 0:
-            await self._send_request(self._requests['start_measure_box_1'])
-        elif self.current_tower == 1:
-            await self._send_request(self._requests['start_measure_box_2'])
-        elif self.current_tower == 2:
-            await self._send_request(self._requests['start_measure_box_3'])
-        data = await self._receive_response()
-        if data and self._check_packet(data):
-            # Wait time as per original code (e.g., 3 seconds)
+        request = self._start_measure_request()
+        if request is None:
+            self._state = 0
+            return
+        data = await self._send_and_receive(request, 'state 12')
+        if data:
+            # Give the BMS time to collect the cell data.
             await asyncio.sleep(self.SLEEP_TIME)
             self._state = 13
-        else:
-            _LOGGER.error("Invalid or no data received in state 12")
-            self._state = 0
 
     async def _state13_send_request11(self) -> None:
         """State 13: Send request 11"""

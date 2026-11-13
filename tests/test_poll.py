@@ -51,5 +51,22 @@ class TestPollSuccess(PollTestCase):
         self.assertEqual(tower["state_string"], "Cells Imbalance")
 
 
+class TestStartMeasureRequest(unittest.TestCase):
+    """The 'start measurement' write exists for towers 1-3 only."""
+
+    def test_towers(self):
+        battery = BYDHVS("127.0.0.1")
+        for tower, name in enumerate(
+            ("start_measure_box_1", "start_measure_box_2",
+             "start_measure_box_3")
+        ):
+            battery.current_tower = tower
+            self.assertEqual(
+                battery._start_measure_request(), battery._requests[name]
+            )
+        battery.current_tower = 3
+        self.assertIsNone(battery._start_measure_request())
+
+
 if __name__ == "__main__":
     unittest.main()
