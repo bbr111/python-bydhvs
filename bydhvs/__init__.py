@@ -10,7 +10,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 import crcmod
 
@@ -53,6 +53,15 @@ class BYDHVSConnectionError(BYDHVSError):
 
 class BYDHVSTimeoutError(BYDHVSError):
     """Exception raised when a timeout occurs during communication."""
+
+
+class BYDHVSProtocolError(BYDHVSConnectionError):
+    """The battery answered, but not with the expected data.
+
+    Raised e.g. for a broken CRC, a Modbus exception or an answer that
+    does not match the request. It is a subclass of BYDHVSConnectionError,
+    so code that already catches BYDHVSConnectionError handles it too.
+    """
 
 
 CRC16 = crcmod.predefined.mkCrcFun('modbus')
@@ -119,7 +128,7 @@ class BYDHVS:
     SLEEP_TIME = 4
     READ_TIMEOUT = 15
     CONNECT_TIMEOUT = 15
-    BUFFER_SIZE = 1024
+    BUFFER_SIZE = 1024  # unused since responses are read frame by frame
     # Packet structure constants
     MIN_PACKET_LENGTH = 5
     MODBUS_EXCEPTION_PACKET_LENGTH = 5
@@ -132,6 +141,16 @@ class BYDHVS:
     MODBUS_EXCEPTION_FLAG = 0x80
     FUNCTION_CODE_READ = 3
     FUNCTION_CODE_WRITE = 16
+    # Home Assistant rejects states longer than 255 characters; the
+    # warning/error texts are used as sensor states.
+    MAX_TEXT_LENGTH = 255
+    # See self._retry_requests in __init__ for why only these.
+    RETRY_REQUEST_NAMES = (
+        'read_serial_number',
+        'read_status_information',
+        'read_battery_info',
+        'read_measurement_status',
+    )
 
     def __init__(self, ip_address: str, port: int = 8080) -> None:
         """Initialize the BYDHVS communication class.
@@ -153,6 +172,13 @@ class BYDHVS:
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._state = 0
+        # Set by poll(): True only if the whole polling sequence finished,
+        # otherwise _poll_error tells what went wrong.
+        self._poll_complete = False
+        self._poll_error: Optional[BYDHVSError] = None
+        # The state machine can finish before socket cleanup does.
+        self._poll_running = False
+        self._last_receive_error: Optional[str] = None
 
         # Initialize battery parameters
         self.hvs_soc = 0
@@ -180,6 +206,7 @@ class BYDHVS:
         self.hvs_power = 0.0
         self.hvs_diff_volt = 0.0
         self.hvs_error_string = ""
+        self.hvs_error_messages: List[str] = []
         self.hvs_charge_total = 0.0
         self.hvs_discharge_total = 0.0
         self.hvs_eta = 0.0
@@ -268,10 +295,21 @@ class BYDHVS:
             "AirSwitch Abnormal"                            # Bit 15
         ]
 
+        # Requests that may be sent a second time when the first answer is
+        # missing or broken. They only read values, and reading them twice
+        # returns the same data. Deliberately NOT included:
+        # - read_cell_volt_temp: every read returns the NEXT cell packet
+        #   (5, 6, 7, 8, ...), so a repeat would silently skip one packet.
+        # - all writes (start_measure_box_*, switch_pass): they are never
+        #   sent more often than in the normal polling sequence.
+        self._retry_requests = {
+            self._requests[name] for name in self.RETRY_REQUEST_NAMES
+        }
+
         # Battery configuration (set during parsing)
         self._battery_config: Optional[BatteryConfig] = None
 
-    async def _connect(self) -> None:
+    async def _connect(self, *, set_initial_state: bool = True) -> None:
         """Establish a connection to the battery.
 
         Opens an async TCP connection to the battery system.
@@ -286,7 +324,8 @@ class BYDHVS:
                 timeout=self.CONNECT_TIMEOUT,
             )
             _LOGGER.debug("Connected to %s:%s", self._ip_address, self._port)
-            self._state = 2  # Next state
+            if set_initial_state:
+                self._state = 2  # Initial state after opening a connection
         except (TimeoutError, asyncio.TimeoutError) as e:
             _LOGGER.error(
                 "Timeout connecting to %s:%s - %s",
@@ -304,55 +343,106 @@ class BYDHVS:
                 f"OS error connecting to {self._ip_address}:{self._port}"
             ) from e
 
-    async def _send_request(self, request: bytes) -> None:
+    async def _send_request(self, request: bytes) -> bool:
         """Send a request to the battery.
 
         Args:
             request: Raw bytes to send over TCP connection
 
-        Note:
-            Sets state to 0 on connection errors
+        Returns:
+            True if the request was sent, False on connection errors.
+            The caller decides how to continue (see _send_and_receive).
         """
-        if self._writer:
-            try:
-                self._writer.write(request)
-                await self._writer.drain()
-                _LOGGER.debug("Sent: %s", request.hex())
-            except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                _LOGGER.error("Error sending data: %s", e)
-                self._state = 0
-        else:
+        if not self._writer:
             _LOGGER.error("No connection available")
+            return False
+        try:
+            self._writer.write(request)
+            await self._writer.drain()
+        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            _LOGGER.error("Error sending data: %s", e)
+            return False
+        _LOGGER.debug("Sent: %s", request.hex())
+        return True
+
+    def _remaining_frame_length(self, header: bytes) -> Optional[int]:
+        """Return how many bytes follow the 3 header bytes of a frame.
+
+        The battery answers in Modbus RTU format. The first 3 bytes tell
+        how long the whole frame is:
+
+            read (function 3):   addr, 3, byte_count,
+                                 <byte_count data bytes>, crc_lo, crc_hi
+            write (function 16): addr, 16, reg_hi, reg_lo, count_hi,
+                                 count_lo, crc_lo, crc_hi   (8 bytes)
+            exception:           addr, function | 0x80, code,
+                                 crc_lo, crc_hi             (5 bytes)
+
+        Returns None for an unknown function code.
+        """
+        function_code = header[1]
+        if function_code == self.FUNCTION_CODE_READ:
+            return header[2] + self.PACKET_CRC_SIZE
+        if function_code == self.FUNCTION_CODE_WRITE:
+            return 8 - self.PACKET_HEADER_SIZE
+        if function_code & self.MODBUS_EXCEPTION_FLAG:
+            return self.MODBUS_EXCEPTION_PACKET_LENGTH - self.PACKET_HEADER_SIZE
+        return None
+
+    async def _read_frame(self, reader: asyncio.StreamReader) -> bytes:
+        """Read exactly one response frame from the connection.
+
+        TCP does not keep message boundaries, so a frame can arrive in
+        several pieces (or together with the next one). Reading the
+        header first and then exactly the announced number of bytes
+        always returns one complete frame.
+
+        Raises:
+            asyncio.IncompleteReadError: If the connection closes early
+        """
+        header = await reader.readexactly(self.PACKET_HEADER_SIZE)
+        remaining = self._remaining_frame_length(header)
+        if remaining is None:
+            # Unknown frame layout: return the header only, the packet
+            # check rejects it.
+            return header
+        return header + await reader.readexactly(remaining)
 
     async def _receive_response(self) -> Optional[bytes]:
-        """Receive a response from the battery.
+        """Receive one complete response frame from the battery.
 
         Returns:
-            Response bytes if successful, None on timeout or error
-
-        Note:
-            Sets state to 0 on errors and returns None
+            Response bytes if successful, None on timeout or error.
+            The caller decides how to continue (see _send_and_receive).
         """
-        if self._reader:
-            try:
-                data = await asyncio.wait_for(
-                    self._reader.read(self.BUFFER_SIZE),
-                    timeout=self.READ_TIMEOUT
-                    )
-                _LOGGER.debug("Received: %s", data.hex())
-                return data
-            except TimeoutError:
-                _LOGGER.error("Socket timeout")
-                self._state = 0
-            except asyncio.IncompleteReadError as e:
-                _LOGGER.error("Incomplete read error: %s", e)
-                self._state = 0
-            except (ConnectionResetError, OSError) as e:
-                _LOGGER.error("Error receiving data: %s", e)
-                self._state = 0
-        else:
+        self._last_receive_error = None
+        if not self._reader:
+            self._last_receive_error = 'connection'
             _LOGGER.error("No connection available")
-        return None
+            return None
+        try:
+            data = await asyncio.wait_for(
+                self._read_frame(self._reader), timeout=self.READ_TIMEOUT
+            )
+        # asyncio.TimeoutError is a separate class before Python 3.11
+        # (on 3.11+ it is the same as TimeoutError).
+        except (TimeoutError, asyncio.TimeoutError):
+            _LOGGER.error("Socket timeout")
+            self._last_receive_error = 'timeout'
+            return None
+        except asyncio.IncompleteReadError as e:
+            _LOGGER.error(
+                "Connection closed after %d bytes of a response",
+                len(e.partial),
+            )
+            self._last_receive_error = 'connection'
+            return None
+        except (ConnectionResetError, OSError) as e:
+            _LOGGER.error("Error receiving data: %s", e)
+            self._last_receive_error = 'connection'
+            return None
+        _LOGGER.debug("Received: %s", data.hex())
+        return data
 
     def _check_packet(self, data: bytes) -> bool:
         """Check if the received packet is valid.
@@ -378,10 +468,33 @@ class BYDHVS:
         if function_code == self.FUNCTION_CODE_READ:
             if packet_length != len(data):
                 return False
-        elif function_code != self.FUNCTION_CODE_WRITE:
+        elif function_code == self.FUNCTION_CODE_WRITE:
+            if len(data) != 8:
+                return False
+        else:
             return False
         crc = CRC16(data)
         return crc == 0
+
+    @staticmethod
+    def _active_flags(flags: int, names: List[str]) -> List[str]:
+        """Return all active warning names without truncation."""
+        return [
+            name for bit, name in enumerate(names) if flags & (1 << bit)
+        ]
+
+    @classmethod
+    def _flags_to_text(cls, flags: int, names: List[str]) -> str:
+        """Return the names of all set bits, joined with "; ".
+
+        Bit 0 maps to names[0], bit 1 to names[1], and so on. Returns
+        "No Error" if no bit is set. The text is cut to MAX_TEXT_LENGTH
+        characters (ending with "...") so it always fits a sensor state.
+        """
+        text = "; ".join(cls._active_flags(flags, names)) or "No Error"
+        if len(text) > cls.MAX_TEXT_LENGTH:
+            text = text[:cls.MAX_TEXT_LENGTH - 3] + "..."
+        return text
 
     @staticmethod
     def _buf2int16_si(data: bytes, pos: int) -> int:
@@ -405,7 +518,11 @@ class BYDHVS:
 
     def _parse_packet0(self, data: bytes) -> None:
         """Parse packet 0 containing serial number and firmware versions."""
-        self.hvs_serial = data[3:22].decode('ascii').strip()
+        try:
+            self.hvs_serial = data[3:22].decode('ascii').strip()
+        except UnicodeDecodeError as e:
+            _LOGGER.error("Invalid ASCII in battery serial number")
+            raise BYDHVSProtocolError("Invalid battery serial number") from e
 
         # Detect battery type from hardware code in serial
         hardware_type = data[5]
@@ -451,13 +568,12 @@ class BYDHVS:
         self.hvs_diff_volt = round(self.hvs_max_volt - self.hvs_min_volt, 2)
 
         # Construct error string based on error codes
-        self.hvs_error_string = "; ".join(
-            [
-                err
-                for i, err in enumerate(self._errors)
-                if self.hvs_error & (1 << i)
-            ]
-        ) or "No Error"
+        self.hvs_error_messages = self._active_flags(
+            self.hvs_error, self._errors
+        )
+        self.hvs_error_string = self._flags_to_text(
+            self.hvs_error, self._errors
+        )
 
         self.hvs_charge_total = self._buf2int32_us(data, 37) / 10
         self.hvs_discharge_total = self._buf2int32_us(data, 41) / 10
@@ -576,16 +692,21 @@ class BYDHVS:
             )
         tower['soh'] = round(self._buf2int16_si(data, 55), 1)
         tower['current'] = round(self._buf2int16_si(data, 57) / 10.0, 1)
-        tower['state'] = f"{data[59]}{data[60]}"
-        # tower['state_string'] = self.stat_tower[tower['state']]
-
-        tower['state_string'] = "; ".join(
-            [
-                err
-                for i, err in enumerate(self._stat_tower)
-                if int(tower['state']) & (1 << i)
-            ]
-        ) or "No Error"
+        # Bytes 59-60 hold the tower warning flags as one 16-bit register
+        # (big-endian, like every Modbus register): bit 0 is the lowest bit
+        # of byte 60, bit 8 the lowest bit of byte 59. Bit names see
+        # self._stat_tower. Earlier versions concatenated the two bytes as
+        # decimal text (e.g. 1 and 0 -> "10"), which decoded every flag in
+        # byte 59 wrongly.
+        state_code = int.from_bytes(data[59:61], byteorder='big')
+        tower['state_code'] = state_code
+        tower['state'] = f"{state_code:04X}"  # e.g. "0100" for bit 8
+        tower['state_string'] = self._flags_to_text(
+            state_code, self._stat_tower
+        )
+        tower['state_messages'] = self._active_flags(
+            state_code, self._stat_tower
+        )
 
         # Cell voltages (Bytes 101 to 132) for cells 1 to 16
         tower['cell_voltages'] = [
@@ -657,12 +778,13 @@ class BYDHVS:
         ])
 
     async def _close(self) -> None:
-        """Close the connection to the battery."""
-        if self._writer:
-            self._writer.close()
-            await self._writer.wait_closed()
-            self._reader = None
-            self._writer = None
+        """Close the connection, clearing references even if close fails."""
+        writer = self._writer
+        self._reader = None
+        self._writer = None
+        if writer:
+            writer.close()
+            await writer.wait_closed()
             _LOGGER.debug("Connection closed")
 
     async def _send_and_receive(
@@ -672,6 +794,11 @@ class BYDHVS:
     ) -> Optional[bytes]:
         """Send request and receive response with error handling.
 
+        If the answer is missing or invalid, requests from
+        RETRY_REQUEST_NAMES are sent a second time; all other requests
+        are never repeated. On failure the state is set to 0, which ends
+        the poll.
+
         Args:
             request: The request bytes to send
             state_name: Name of the current state for logging
@@ -679,10 +806,70 @@ class BYDHVS:
         Returns:
             Response data if successful, None otherwise
         """
-        await self._send_request(request)
+        data, sent = await self._send_and_receive_once(request, state_name)
+        if data is None and sent and request in self._retry_requests:
+            # A timed-out frame may still be arriving. Retry only on a
+            # fresh TCP stream, so late bytes cannot become the next reply.
+            _LOGGER.warning("Retrying %s once on a new connection", state_name)
+            try:
+                await self._close()
+            except (OSError, asyncio.IncompleteReadError) as e:
+                _LOGGER.debug("Error closing socket before retry: %s", e)
+            await self._connect(set_initial_state=False)
+            data, sent = await self._send_and_receive_once(
+                request, state_name
+            )
+        if data is None:
+            self._poll_error = self._communication_error(state_name, sent)
+            self._state = 0
+        return data
+
+    def _communication_error(
+        self, state_name: str, sent: bool
+    ) -> BYDHVSError:
+        """Return the exception poll() raises after a failed request."""
+        where = f"{state_name} (tower {self.current_tower + 1})"
+        if not sent:
+            return BYDHVSConnectionError(
+                f"Connection lost in {where}"
+            )
+        if self._last_receive_error == 'timeout':
+            return BYDHVSTimeoutError(f"No answer from the battery in {where}")
+        if self._last_receive_error == 'connection':
+            return BYDHVSConnectionError(f"Connection lost while reading {where}")
+        return BYDHVSProtocolError(f"Invalid answer from the battery in {where}")
+
+    def _finish_poll(self) -> None:
+        """End the state machine after the last step of a full poll."""
+        self._poll_complete = True
+        self._state = 0
+
+    async def _send_and_receive_once(
+        self,
+        request: bytes,
+        state_name: str
+    ) -> Tuple[Optional[bytes], bool]:
+        """Send a request once and return (response, sent).
+
+        response is None if the answer is missing or invalid. sent is
+        False if the request could not be sent at all (connection
+        broken), in which case a retry makes no sense.
+        """
+        if not await self._send_request(request):
+            return None, False
         data = await self._receive_response()
         if data and self._check_packet(data):
-            return data
+            if self._matches_request(data, request):
+                return data, True
+            _LOGGER.error(
+                "Response in %s for tower %d does not match the request "
+                "(request=%s, response length=%d)",
+                state_name,
+                self.current_tower,
+                request.hex(),
+                len(data),
+            )
+            return None, True
 
         if data and self._is_modbus_exception_response(data, request):
             exception_code = data[2]
@@ -694,8 +881,7 @@ class BYDHVS:
                 exception_code,
                 len(data),
             )
-            self._state = 0
-            return None
+            return None, True
 
         if data:
             _LOGGER.error(
@@ -706,8 +892,26 @@ class BYDHVS:
             )
         else:
             _LOGGER.error("Invalid or no data received in %s", state_name)
-        self._state = 0
-        return None
+        return None, True
+
+    def _matches_request(self, data: bytes, request: bytes) -> bool:
+        """Check that a (valid) response belongs to the request.
+
+        The response must have the same function code. For a read
+        (function 3), the request asks for a number of 16-bit registers
+        (request bytes 4-5), so the response must carry exactly twice as
+        many data bytes (response byte 2). This catches a late answer to
+        an earlier request being taken for the answer to this one.
+        """
+        if data[0] != request[0] or data[1] != request[1]:
+            return False
+        if request[1] == self.FUNCTION_CODE_READ:
+            register_count = int.from_bytes(request[4:6], byteorder='big')
+            return data[2] == 2 * register_count
+        if request[1] == self.FUNCTION_CODE_WRITE:
+            # Modbus function 16 replies echo register and register count.
+            return len(data) == 8 and data[2:6] == request[2:6]
+        return False
 
     def _is_modbus_exception_response(self, data: bytes, request: bytes) -> bool:
         """Check if response is a valid Modbus exception packet.
@@ -747,19 +951,29 @@ class BYDHVS:
         4. Read detailed cell voltages and temperatures for all towers
 
         Raises:
-            BYDHVSConnectionError: If connection fails
-            BYDHVSTimeoutError: If communication times out
-            BYDHVSError: For other battery communication errors
+            BYDHVSConnectionError: If the connection fails or breaks
+            BYDHVSTimeoutError: If connecting or an answer times out
+            BYDHVSProtocolError: If the battery sends an invalid answer
+                (subclass of BYDHVSConnectionError)
+            BYDHVSError: For other battery communication errors, or if
+                poll() is called while a poll is still running
 
         Note:
-            Call get_data() after successful poll() to retrieve collected data
+            Call get_data() after a successful poll() to retrieve the data.
+            poll() only returns normally if ALL steps succeeded. After an
+            exception, get_data() can contain a mix of values from this
+            and the previous poll and should not be used.
+            (Up to 0.4.14, poll() returned normally even if a step failed.)
         """
-        if self._state != 0:
-            _LOGGER.warning("Already polling")
-            return
+        if self._poll_running:
+            # A previous poll stays active until its socket has been closed.
+            raise BYDHVSError("poll() is already running")
+        self._poll_running = True
         self._state = 1
         self.current_tower = 0
         self.state_action_list = []
+        self._poll_complete = False
+        self._poll_error = None
 
         try:
             await self._connect()
@@ -789,18 +1003,37 @@ class BYDHVS:
                     await action()
                 else:
                     _LOGGER.error("Unknown state: %s", self._state)
+                    self._poll_error = BYDHVSError(
+                        f"Unknown polling state {self._state}"
+                    )
                     self._state = 0
 
+            if not self._poll_complete:
+                # A step failed and stopped the state machine. Report it
+                # instead of returning as if the poll had succeeded.
+                raise self._poll_error or BYDHVSError(
+                    "Polling stopped before all data was read"
+                )
+
+        except BYDHVSError:
+            # Expected communication problem: the details were already
+            # logged where it happened, and the caller gets the exception.
+            # No traceback, it would only repeat the message.
+            raise
         except Exception as e:
+            # Anything else is a bug: log it with the traceback.
             _LOGGER.error("Error during polling: %s", e, exc_info=True)
             raise
         finally:
             try:
-                await self._close()
-            except (OSError, ConnectionResetError,
-                    asyncio.IncompleteReadError, asyncio.CancelledError) as e:
-                _LOGGER.debug("Error closing connection: %s", e)
-            self._state = 0
+                try:
+                    await self._close()
+                except (OSError, ConnectionResetError,
+                        asyncio.IncompleteReadError, asyncio.CancelledError) as e:
+                    _LOGGER.debug("Error closing connection: %s", e)
+            finally:
+                self._state = 0
+                self._poll_running = False
 
     async def _state2_send_request0(self) -> None:
         """State 2: Send request 0 and parse packet 0."""
@@ -837,24 +1070,43 @@ class BYDHVS:
             if self.hvs_num_cells > 0 and self.hvs_num_temps > 0:
                 self._state = 5
             else:
-                self._state = 0  # End polling if no detailed data available
+                # No cell data for this battery type: nothing more to read.
+                self._finish_poll()
+
+    def _start_measure_request(self) -> Optional[bytes]:
+        """Return the 'start measurement' request for the current tower.
+
+        This request is a write (function 16) that tells the BMS of tower
+        1, 2 or 3 to collect its cell data. Requests exist for 3 towers
+        only; for more towers None is returned and polling stops.
+        """
+        requests = {
+            0: self._requests['start_measure_box_1'],
+            1: self._requests['start_measure_box_2'],
+            2: self._requests['start_measure_box_3'],
+        }
+        request = requests.get(self.current_tower)
+        if request is None:
+            _LOGGER.error(
+                "Cell data of tower %d is not supported (max. 3 towers)",
+                self.current_tower + 1,
+            )
+        return request
 
     async def _state5_start_measurement(self) -> None:
         """State 5: Start measurement and proceed with detailed queries."""
-        if self.current_tower == 0:
-            await self._send_request(self._requests['start_measure_box_1'])
-        elif self.current_tower == 1:
-            await self._send_request(self._requests['start_measure_box_2'])
-        elif self.current_tower == 2:
-            await self._send_request(self._requests['start_measure_box_3'])
-        data = await self._receive_response()
-        if data and self._check_packet(data):
-            # Wait time as per original code (e.g., 8 seconds)
+        request = self._start_measure_request()
+        if request is None:
+            self._poll_error = BYDHVSError(
+                f"Cell data of tower {self.current_tower + 1} not supported"
+            )
+            self._state = 0
+            return
+        data = await self._send_and_receive(request, 'state 5')
+        if data:
+            # Give the BMS time to collect the cell data.
             await asyncio.sleep(self.SLEEP_TIME)
             self._state = 6
-        else:
-            _LOGGER.error("Invalid or no data received in state 5")
-            self._state = 0
 
     async def _state6_send_request4(self) -> None:
         """State 6: Send request 4"""
@@ -921,7 +1173,7 @@ class BYDHVS:
                     self.current_tower += 1
                     self._state = 5
                 else:
-                    self._state = 0  # Polling completed
+                    self._finish_poll()  # last tower done
 
     async def _state11_send_request9(self) -> None:
         """Handle additional cells for more than 128 cells (e.g., 5 modules)"""
@@ -934,20 +1186,18 @@ class BYDHVS:
 
     async def _state12_send_request10(self) -> None:
         """State 12: Send request 10 - Start measurement"""
-        if self.current_tower == 0:
-            await self._send_request(self._requests['start_measure_box_1'])
-        elif self.current_tower == 1:
-            await self._send_request(self._requests['start_measure_box_2'])
-        elif self.current_tower == 2:
-            await self._send_request(self._requests['start_measure_box_3'])
-        data = await self._receive_response()
-        if data and self._check_packet(data):
-            # Wait time as per original code (e.g., 3 seconds)
+        request = self._start_measure_request()
+        if request is None:
+            self._poll_error = BYDHVSError(
+                f"Cell data of tower {self.current_tower + 1} not supported"
+            )
+            self._state = 0
+            return
+        data = await self._send_and_receive(request, 'state 12')
+        if data:
+            # Give the BMS time to collect the cell data.
             await asyncio.sleep(self.SLEEP_TIME)
             self._state = 13
-        else:
-            _LOGGER.error("Invalid or no data received in state 12")
-            self._state = 0
 
     async def _state13_send_request11(self) -> None:
         """State 13: Send request 11"""
@@ -977,7 +1227,7 @@ class BYDHVS:
                 self.current_tower += 1
                 self._state = 5
             else:
-                self._state = 0  # Letzter Turm erreicht
+                self._finish_poll()  # last tower done
 
     def get_data(self) -> Dict[str, any]:
         """Retrieve the collected data.
@@ -1009,6 +1259,7 @@ class BYDHVS:
             "power": self.hvs_power,
             "error_number": self.hvs_error,
             "error_string": self.hvs_error_string,
+            "error_messages": self.hvs_error_messages,
             "param_t": self.hvs_param_t,
             "output_voltage": self.hvs_out_volt,
             "charge_total": self.hvs_charge_total,
