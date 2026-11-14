@@ -3,12 +3,10 @@
 import asyncio
 from unittest.mock import patch
 
-from fake_battery import FakeBattery
 from frames import read_response
 from test_poll import PollTestCase
 
 from bydhvs import (
-    BYDHVS,
     BYDHVSConnectionError,
     BYDHVSError,
     BYDHVSProtocolError,
@@ -71,14 +69,14 @@ class TestCompleteWarningMessages(PollTestCase):
         names = battery._stat_tower
         # Build synthetic valid read frames with all 16 bits set.
         packet1 = bytearray(read_response(bytes(50)))
-        packet1[29:31] = b"\\xff\\xff"
+        packet1[29:31] = bytes([0xFF, 0xFF])
         battery._parse_packet1(bytes(packet1))
         self.assertEqual(battery.hvs_error_messages, errors)
         self.assertLessEqual(len(battery.hvs_error_string), 255)
         self.assertEqual(battery.get_data()["error_messages"], errors)
 
         packet5 = bytearray(read_response(bytes(130)))
-        packet5[59:61] = b"\\xff\\xff"
+        packet5[59:61] = bytes([0xFF, 0xFF])
         battery._parse_packet5(bytes(packet5))
         tower = battery.tower_attributes[0]
         self.assertEqual(tower["state_messages"], names)
