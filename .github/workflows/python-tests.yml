@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - fix/phase1-robustness
   workflow_dispatch:
 
 permissions:
@@ -17,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.12', '3.13']
+        python-version: ['3.11', '3.12', '3.13', '3.14']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
