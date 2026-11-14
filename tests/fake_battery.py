@@ -178,7 +178,7 @@ class FakeBattery:
 
     async def _handle(self, reader, writer) -> None:
         cell_packets = _cell_packets()
-        second_pass = False
+        current_tower_request = None
         try:
             while True:
                 request = await reader.read(1024)
@@ -186,19 +186,18 @@ class FakeBattery:
                     break
                 name = NAME_BY_REQUEST.get(request, request.hex())
                 self.received.append(name)
-                if name.startswith("start_measure_box_") and not second_pass:
-                    # Reset for the first pass of each new tower.
-                    cell_packets = _cell_packets()
-                if name == "start_measure_box_2" and second_pass:
-                    # Each tower starts a new first pass after the previous
-                    # tower has finished its second pass.
-                    second_pass = False
+                if (
+                    name.startswith("start_measure_box_")
+                    and name != current_tower_request
+                ):
+                    # A new tower starts its first pass. Repeated starts for
+                    # the same tower after switch_pass keep second-pass data.
+                    current_tower_request = name
                     cell_packets = _cell_packets()
                 fault = None
                 if self.faults.get(name):
                     fault = self.faults[name].pop(0)
                 if name == "switch_pass":
-                    second_pass = True
                     cell_packets = _extra_cell_packets()
                 if fault == "drop":
                     continue
