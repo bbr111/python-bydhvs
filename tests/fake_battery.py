@@ -30,13 +30,16 @@ REQUESTS = {
     "start_measure_box_1": bytes.fromhex("0110055000020400018100f853"),
     "read_measurement_status": bytes.fromhex("010305510001d517"),
     "read_cell_volt_temp": bytes.fromhex("01030558004104e5"),
+    "switch_pass": bytes.fromhex("01100100000306444542554700176f"),
+    "start_measure_box_2": bytes.fromhex("01100550000204000281000853"),
+    "start_measure_box_3": bytes.fromhex("01100550000204000381005993"),
 }
 NAME_BY_REQUEST = {frame: name for name, frame in REQUESTS.items()}
 
 SERIAL = "P030T020Z2008190034"  # 19 chars; 3rd char "3" (51) = HVS
 
 
-def _packet0() -> bytes:
+def _packet0(towers: int = 1, modules: int = 3) -> bytes:
     """Serial number, firmware versions, towers/modules, grid type."""
     data = bytearray(0x66 * 2)  # 0x66 registers
     data[0:19] = SERIAL.encode("ascii")  # frame bytes 3-21
@@ -46,7 +49,7 @@ def _packet0() -> bytes:
     data[31 - 3:33 - 3] = bytes([3, 31])  # BMS V3.31
     data[33 - 3] = 1  # BMU runs from bank B
     data[34 - 3] = 1  # BMS bank B
-    data[36 - 3] = 0x13  # 1 tower (high nibble), 3 modules (low nibble)
+    data[36 - 3] = (towers << 4) | modules
     data[38 - 3] = 1  # OnGrid
     return read_response(bytes(data))
 
@@ -116,10 +119,27 @@ def _cell_packets() -> list:
     return packets
 
 
+def _extra_cell_packets() -> list:
+    """Second pass for HVS 5-module batteries: cells 129-160."""
+    data12 = bytearray(0x41 * 2)
+    data12[17 - 3:21 - 3] = bytes([0x01, 0x00, 0x00, 0x80])
+    for index in range(16):
+        pos = 101 - 3 + index * 2
+        data12[pos:pos + 2] = (3428 + index).to_bytes(2, "big")
+
+    data13 = bytearray(0x41 * 2)
+    for index in range(16):
+        pos = 5 - 3 + index * 2
+        data13[pos:pos + 2] = (3444 + index).to_bytes(2, "big")
+    return [read_response(bytes(data12)), read_response(bytes(data13))]
+
+
 class FakeBattery:
     """TCP server answering BYDHVS requests with synthetic frames."""
 
-    def __init__(self) -> None:
+    def __init__(self, towers: int = 1, modules: int = 3) -> None:
+        self.towers = towers
+        self.modules = modules
         self.received: list = []
         self.faults: dict = {}
         self._server = None
@@ -141,13 +161,15 @@ class FakeBattery:
 
     def _answer(self, name: str, cell_packets: list) -> bytes:
         if name == "read_serial_number":
-            return _packet0()
+            return _packet0(self.towers, self.modules)
         if name == "read_status_information":
             return _packet1()
         if name == "read_battery_info":
             return _packet2()
-        if name == "start_measure_box_1":
+        if name.startswith("start_measure_box_"):
             return write_response(0x0550, 2)
+        if name == "switch_pass":
+            return write_response(0x0100, 3)
         if name == "read_measurement_status":
             return read_response(bytes(2))
         if name == "read_cell_volt_temp":
@@ -156,6 +178,7 @@ class FakeBattery:
 
     async def _handle(self, reader, writer) -> None:
         cell_packets = _cell_packets()
+        second_pass = False
         try:
             while True:
                 request = await reader.read(1024)
@@ -163,9 +186,20 @@ class FakeBattery:
                     break
                 name = NAME_BY_REQUEST.get(request, request.hex())
                 self.received.append(name)
+                if name.startswith("start_measure_box_") and not second_pass:
+                    # Reset for the first pass of each new tower.
+                    cell_packets = _cell_packets()
+                if name == "start_measure_box_2" and second_pass:
+                    # Each tower starts a new first pass after the previous
+                    # tower has finished its second pass.
+                    second_pass = False
+                    cell_packets = _cell_packets()
                 fault = None
                 if self.faults.get(name):
                     fault = self.faults[name].pop(0)
+                if name == "switch_pass":
+                    second_pass = True
+                    cell_packets = _extra_cell_packets()
                 if fault == "drop":
                     continue
                 if fault == "disconnect":
