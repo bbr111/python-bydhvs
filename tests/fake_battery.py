@@ -11,12 +11,16 @@ Faults can be injected per request name to test the error handling:
     "split"    - send the answer in small chunks with pauses
     "corrupt"  - send the answer with a broken CRC
     "exception"- answer with a Modbus exception frame
+    "delay"    - send a response after longer than the client timeout
+    "disconnect" - close connection without answering
+    "wrong_write_echo" - acknowledge the wrong register/count
+    "bad_serial" - respond with non-ASCII bytes and a valid CRC
 Each fault in a list is used once, for the next matching request.
 """
 
 import asyncio
 
-from frames import exception_response, read_response, write_response
+from frames import exception_response, read_response, write_response, with_crc
 
 # Request frames exactly as BYDHVS sends them (see BYDHVS._requests).
 REQUESTS = {
@@ -164,11 +168,21 @@ class FakeBattery:
                     fault = self.faults[name].pop(0)
                 if fault == "drop":
                     continue
+                if fault == "disconnect":
+                    break
                 if fault == "exception":
                     writer.write(exception_response(request[1], 2))
                     await writer.drain()
                     continue
                 answer = self._answer(name, cell_packets)
+                if fault == "delay":
+                    await asyncio.sleep(0.45)
+                if fault == "wrong_write_echo":
+                    answer = write_response(0x0100, 3)
+                if fault == "bad_serial":
+                    payload = bytearray(answer[:-2])
+                    payload[5] = 0xFF
+                    answer = with_crc(bytes(payload))
                 if fault == "corrupt":
                     answer = answer[:-1] + bytes([answer[-1] ^ 0xFF])
                 if fault == "split":
