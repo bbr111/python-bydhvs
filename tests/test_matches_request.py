@@ -36,6 +36,24 @@ class TestMatchesRequest(unittest.TestCase):
             write_response(), self.requests["start_measure_box_1"]
         ))
 
+    def test_write_ack_rejects_wrong_register_or_count(self):
+        request = self.requests["start_measure_box_1"]
+        self.assertFalse(self.battery._matches_request(
+            write_response(0x0100, 2), request
+        ))
+        self.assertFalse(self.battery._matches_request(
+            write_response(0x0550, 3), request
+        ))
+
+    def test_write_ack_accepts_switch_pass_only_when_matching(self):
+        request = self.requests["switch_pass"]
+        self.assertTrue(self.battery._matches_request(
+            write_response(0x0100, 3), request
+        ))
+        self.assertFalse(self.battery._matches_request(
+            write_response(0x0550, 2), request
+        ))
+
     def test_all_poll_requests_match_fake_battery(self):
         """Register counts of the requests used by poll()."""
         sizes = {
