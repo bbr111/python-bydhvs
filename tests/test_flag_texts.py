@@ -12,15 +12,22 @@ PACKET1_DATA_LEN = 50
 
 class TestFlagsToText(unittest.TestCase):
 
+    """Test conversion of battery flags to readable text."""
+
+    # These tests intentionally exercise internal flag parsing.
+    # pylint: disable=protected-access
+
     def setUp(self):
         self.battery = BYDHVS("127.0.0.1")
 
     def test_no_flags(self):
+        """Return the no-error text when no flags are set."""
         self.assertEqual(
             self.battery._flags_to_text(0, self.battery._errors), "No Error"
         )
 
     def test_single_and_multiple_flags(self):
+        """Return text for single and multiple active flags."""
         errors = self.battery._errors
         self.assertEqual(self.battery._flags_to_text(0b1, errors), errors[0])
         self.assertEqual(
