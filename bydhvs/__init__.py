@@ -176,7 +176,9 @@ class BYDHVS:
         # otherwise _poll_error tells what went wrong.
         self._poll_complete = False
         self._poll_error: Optional[BYDHVSError] = None
-        self._last_read_timed_out = False
+        # The state machine can finish before socket cleanup does.
+        self._poll_running = False
+        self._last_receive_error: Optional[str] = None
 
         # Initialize battery parameters
         self.hvs_soc = 0
@@ -204,6 +206,7 @@ class BYDHVS:
         self.hvs_power = 0.0
         self.hvs_diff_volt = 0.0
         self.hvs_error_string = ""
+        self.hvs_error_messages: List[str] = []
         self.hvs_charge_total = 0.0
         self.hvs_discharge_total = 0.0
         self.hvs_eta = 0.0
@@ -306,7 +309,7 @@ class BYDHVS:
         # Battery configuration (set during parsing)
         self._battery_config: Optional[BatteryConfig] = None
 
-    async def _connect(self) -> None:
+    async def _connect(self, *, set_initial_state: bool = True) -> None:
         """Establish a connection to the battery.
 
         Opens an async TCP connection to the battery system.
@@ -321,7 +324,8 @@ class BYDHVS:
                 timeout=self.CONNECT_TIMEOUT,
             )
             _LOGGER.debug("Connected to %s:%s", self._ip_address, self._port)
-            self._state = 2  # Next state
+            if set_initial_state:
+                self._state = 2  # Initial state after opening a connection
         except (TimeoutError, asyncio.TimeoutError) as e:
             _LOGGER.error(
                 "Timeout connecting to %s:%s - %s",
@@ -411,7 +415,9 @@ class BYDHVS:
             Response bytes if successful, None on timeout or error.
             The caller decides how to continue (see _send_and_receive).
         """
+        self._last_receive_error = None
         if not self._reader:
+            self._last_receive_error = 'connection'
             _LOGGER.error("No connection available")
             return None
         try:
@@ -422,16 +428,18 @@ class BYDHVS:
         # (on 3.11+ it is the same as TimeoutError).
         except (TimeoutError, asyncio.TimeoutError):
             _LOGGER.error("Socket timeout")
-            self._last_read_timed_out = True
+            self._last_receive_error = 'timeout'
             return None
         except asyncio.IncompleteReadError as e:
             _LOGGER.error(
                 "Connection closed after %d bytes of a response",
                 len(e.partial),
             )
+            self._last_receive_error = 'connection'
             return None
         except (ConnectionResetError, OSError) as e:
             _LOGGER.error("Error receiving data: %s", e)
+            self._last_receive_error = 'connection'
             return None
         _LOGGER.debug("Received: %s", data.hex())
         return data
@@ -460,10 +468,20 @@ class BYDHVS:
         if function_code == self.FUNCTION_CODE_READ:
             if packet_length != len(data):
                 return False
-        elif function_code != self.FUNCTION_CODE_WRITE:
+        elif function_code == self.FUNCTION_CODE_WRITE:
+            if len(data) != 8:
+                return False
+        else:
             return False
         crc = CRC16(data)
         return crc == 0
+
+    @staticmethod
+    def _active_flags(flags: int, names: List[str]) -> List[str]:
+        """Return all active warning names without truncation."""
+        return [
+            name for bit, name in enumerate(names) if flags & (1 << bit)
+        ]
 
     @classmethod
     def _flags_to_text(cls, flags: int, names: List[str]) -> str:
@@ -473,9 +491,7 @@ class BYDHVS:
         "No Error" if no bit is set. The text is cut to MAX_TEXT_LENGTH
         characters (ending with "...") so it always fits a sensor state.
         """
-        text = "; ".join(
-            name for bit, name in enumerate(names) if flags & (1 << bit)
-        ) or "No Error"
+        text = "; ".join(cls._active_flags(flags, names)) or "No Error"
         if len(text) > cls.MAX_TEXT_LENGTH:
             text = text[:cls.MAX_TEXT_LENGTH - 3] + "..."
         return text
@@ -502,7 +518,11 @@ class BYDHVS:
 
     def _parse_packet0(self, data: bytes) -> None:
         """Parse packet 0 containing serial number and firmware versions."""
-        self.hvs_serial = data[3:22].decode('ascii').strip()
+        try:
+            self.hvs_serial = data[3:22].decode('ascii').strip()
+        except UnicodeDecodeError as e:
+            _LOGGER.error("Invalid ASCII in battery serial number")
+            raise BYDHVSProtocolError("Invalid battery serial number") from e
 
         # Detect battery type from hardware code in serial
         hardware_type = data[5]
@@ -548,6 +568,9 @@ class BYDHVS:
         self.hvs_diff_volt = round(self.hvs_max_volt - self.hvs_min_volt, 2)
 
         # Construct error string based on error codes
+        self.hvs_error_messages = self._active_flags(
+            self.hvs_error, self._errors
+        )
         self.hvs_error_string = self._flags_to_text(
             self.hvs_error, self._errors
         )
@@ -681,6 +704,9 @@ class BYDHVS:
         tower['state_string'] = self._flags_to_text(
             state_code, self._stat_tower
         )
+        tower['state_messages'] = self._active_flags(
+            state_code, self._stat_tower
+        )
 
         # Cell voltages (Bytes 101 to 132) for cells 1 to 16
         tower['cell_voltages'] = [
@@ -752,12 +778,13 @@ class BYDHVS:
         ])
 
     async def _close(self) -> None:
-        """Close the connection to the battery."""
-        if self._writer:
-            self._writer.close()
-            await self._writer.wait_closed()
-            self._reader = None
-            self._writer = None
+        """Close the connection, clearing references even if close fails."""
+        writer = self._writer
+        self._reader = None
+        self._writer = None
+        if writer:
+            writer.close()
+            await writer.wait_closed()
             _LOGGER.debug("Connection closed")
 
     async def _send_and_receive(
@@ -781,7 +808,14 @@ class BYDHVS:
         """
         data, sent = await self._send_and_receive_once(request, state_name)
         if data is None and sent and request in self._retry_requests:
-            _LOGGER.warning("Retrying the request of %s once", state_name)
+            # A timed-out frame may still be arriving. Retry only on a
+            # fresh TCP stream, so late bytes cannot become the next reply.
+            _LOGGER.warning("Retrying %s once on a new connection", state_name)
+            try:
+                await self._close()
+            except (OSError, asyncio.IncompleteReadError) as e:
+                _LOGGER.debug("Error closing socket before retry: %s", e)
+            await self._connect(set_initial_state=False)
             data, sent = await self._send_and_receive_once(
                 request, state_name
             )
@@ -799,8 +833,10 @@ class BYDHVS:
             return BYDHVSConnectionError(
                 f"Connection lost in {where}"
             )
-        if self._last_read_timed_out:
+        if self._last_receive_error == 'timeout':
             return BYDHVSTimeoutError(f"No answer from the battery in {where}")
+        if self._last_receive_error == 'connection':
+            return BYDHVSConnectionError(f"Connection lost while reading {where}")
         return BYDHVSProtocolError(f"Invalid answer from the battery in {where}")
 
     def _finish_poll(self) -> None:
@@ -821,7 +857,6 @@ class BYDHVS:
         """
         if not await self._send_request(request):
             return None, False
-        self._last_read_timed_out = False
         data = await self._receive_response()
         if data and self._check_packet(data):
             if self._matches_request(data, request):
@@ -868,12 +903,15 @@ class BYDHVS:
         many data bytes (response byte 2). This catches a late answer to
         an earlier request being taken for the answer to this one.
         """
-        if data[1] != request[1]:
+        if data[0] != request[0] or data[1] != request[1]:
             return False
         if request[1] == self.FUNCTION_CODE_READ:
             register_count = int.from_bytes(request[4:6], byteorder='big')
             return data[2] == 2 * register_count
-        return True
+        if request[1] == self.FUNCTION_CODE_WRITE:
+            # Modbus function 16 replies echo register and register count.
+            return len(data) == 8 and data[2:6] == request[2:6]
+        return False
 
     def _is_modbus_exception_response(self, data: bytes, request: bytes) -> bool:
         """Check if response is a valid Modbus exception packet.
@@ -927,10 +965,10 @@ class BYDHVS:
             and the previous poll and should not be used.
             (Up to 0.4.14, poll() returned normally even if a step failed.)
         """
-        if self._state != 0:
-            # The battery handles one request sequence at a time; a second
-            # poll() on the same object would mix up both sequences.
+        if self._poll_running:
+            # A previous poll stays active until its socket has been closed.
             raise BYDHVSError("poll() is already running")
+        self._poll_running = True
         self._state = 1
         self.current_tower = 0
         self.state_action_list = []
@@ -988,11 +1026,14 @@ class BYDHVS:
             raise
         finally:
             try:
-                await self._close()
-            except (OSError, ConnectionResetError,
-                    asyncio.IncompleteReadError, asyncio.CancelledError) as e:
-                _LOGGER.debug("Error closing connection: %s", e)
-            self._state = 0
+                try:
+                    await self._close()
+                except (OSError, ConnectionResetError,
+                        asyncio.IncompleteReadError, asyncio.CancelledError) as e:
+                    _LOGGER.debug("Error closing connection: %s", e)
+            finally:
+                self._state = 0
+                self._poll_running = False
 
     async def _state2_send_request0(self) -> None:
         """State 2: Send request 0 and parse packet 0."""
@@ -1218,6 +1259,7 @@ class BYDHVS:
             "power": self.hvs_power,
             "error_number": self.hvs_error,
             "error_string": self.hvs_error_string,
+            "error_messages": self.hvs_error_messages,
             "param_t": self.hvs_param_t,
             "output_voltage": self.hvs_out_volt,
             "charge_total": self.hvs_charge_total,
